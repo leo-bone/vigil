@@ -1,11 +1,22 @@
 # Vigil
 
-**AI 决策账本与熔断内核。** 让每一个 agent 的决定都可拦截、可追溯、可校准。
+**AI 决策账本与熔断内核，带完整的五岔路统筹循环。** 让每一个 agent 的决定都可拦截、可追溯、可校准，让每一次派工都走路由、质量门、止损、验收、升级。
 
 > 你的 agent 会做事，但没人记得它为什么这么做、错了谁负责、下次该改哪条规则。
 > Vigil 就是补上这一层的那块东西。
 
 ```
+┌─ 统筹助理 Orchestrator ──────────────────────────────────┐
+│                                                          │
+│   ┌→ 止损 ──够差就停──→ STOPPED                          │
+│   │   路由 ──选不出人──→ 升级人工 → ESCALATED            │
+│   │   干活（每一轮执行都落账）                            │
+│   │   质量门 ──不过──→ 带反馈回路由                       │
+│   └───验收（四项清单缺一不可）──通过──→ COMPLETED        │
+└────────────────── 每个岔路都是一次内核裁决 ───────────────┘
+                              ↓
+                  只追加账本（哈希链）→ 事后梳理 → 校准 → 预警
+
 agent 想动手  →  ┌──────────────┐  →  放行 / 转人工 / 否决
                   │    Vigil     │
                   │  硬规则否决   │  →  写入只追加账本（哈希链）
@@ -48,6 +59,18 @@ agent 想动手  →  ┌──────────────┐  →  放
 
 合起来就是：**逻辑守底线，概率做灰区。**
 
+### 2.5 五岔路统筹循环（一比一对应 Jev 的判断点）
+
+| 岔路 | 问题 | 确定性部分 | 概率部分 |
+|---|---|---|---|
+| 路由 | 下一个该谁干 | 选出的执行者必须在名册里，否则直接升级 | 在名册内做选择题 |
+| 质量门 | 这份产出够不够 | 检查者结构上永远不是产出人 | 独立复核打分 |
+| 止损 | 继续还是停 | 重试上限、连续失败次数，数数就够 | 进展评分（低于 2 停） |
+| 验收 | 算不算完成 | 四项清单：交付物及位置、独立核验记录、遗留问题声明，**缺一项模型说了也不算** | 实质满足度判断 |
+| 升级 | 要不要人接手 | 涉及金额直接 critical | 风险分级（routine/urgent/critical） |
+
+「监督过程」不是独立模块：循环里每个岔路、每轮执行都是一次被哈希链记录的裁决，`postmortem(sessionId)` 能完整回放每一步为什么这么走。
+
 ### 3. 概率判断只能是选择题
 
 Vigil 只向判断模型发送类型化问题（boolean / choice / score），永远不索取自由文本。它返回概率分布，不返回句子。这在结构上就堵死了"模型自由发挥越权"这条路。
@@ -74,8 +97,10 @@ Vigil 只向判断模型发送类型化问题（boolean / choice / score），�
 
 ```bash
 git clone <this-repo> && cd vigil
-node examples/demo.ts      # 跑一遍十步场景，不需要任何 API key
-npm test                   # 19 个测试
+node examples/demo.ts        # 单线场景：裁决、复盘、校准、预警
+node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑三个任务，
+                             # 覆盖退回重做、自产自验被识破、虚假完成止损
+npm test                     # 31 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -158,6 +183,8 @@ claude mcp add vigil -- node /abs/path/to/vigil/src/cli.ts mcp
 
 ### SDK
 
+#### 只要裁决（单点决策）
+
 ```ts
 import { Kernel, Ledger, JevJudge, defaultPolicy } from 'vigil-oversight';
 
@@ -183,6 +210,27 @@ const verdict = await kernel.decide({
 
 if (verdict.outcome !== 'allow') throw new Error(`被拦截：${verdict.reason}`);
 ```
+
+#### 要完整回路（统筹助理带工人跑任务）
+
+```ts
+import { createPipelineKernel, Orchestrator, JevJudge, Ledger } from 'vigil-oversight';
+
+const kernel = createPipelineKernel(
+  new Ledger('.vigil/ledger.ndjson'),
+  new JevJudge({ apiKey: process.env.TYPESAFE_API_KEY! }),
+);
+const company = new Orchestrator(kernel, { maxAttempts: 3 });
+
+const report = await company.runTask('sess_1', 'task_1', '写一份行业调研', [
+  { id: 'bot/researcher', role: '研究员', run: async (ctx) => ({ /* 产出 */ }) },
+  { id: 'bot/writer', role: '写手', run: async (ctx) => ({ /* 产出 */ }) },
+]);
+// report.status: completed | stopped | escalated
+// report.steps: 每个岔路的走向，人能直接读懂
+```
+
+工人只管干活和交证据；路由、质量门、止损、验收、升级全部由 Orchestrator 驱动，每一步过内核、落账本。`ctx.feedback` 会告诉你上一轮为什么被打回。
 
 ## 四项指标
 
@@ -220,7 +268,8 @@ if (verdict.outcome !== 'allow') throw new Error(`被拦截：${verdict.reason}`
 - [x] 事后梳理 / 校准 / 预警
 - [x] MCP stdio 服务端（零依赖）
 - [x] Claude Code PreToolUse 钩子 + 通用命令包装器
-- [ ] 更多客户端的钩子适配（Cursor / Codex）
+- [x] 五岔路统筹循环（路由 / 质量门 / 止损 / 验收 / 升级）
+- [ ] 统筹循环接入 MCP，让外部 agent 也能被编排
 - [ ] 多 agent 冲突仲裁 `Arbiter`：两个 agent 结论相反时按规则表决
 - [ ] 规则包市场：把每个行业的事故形态沉淀成可复用规则集
 - [ ] 存储层换 libsql，支持并发

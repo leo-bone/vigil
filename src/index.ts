@@ -14,6 +14,38 @@ export type { CalibrationReport } from './review/calibrate.ts';
 export { scanAlerts } from './alerts.ts';
 export type { Alert, AlertOptions } from './alerts.ts';
 export { startMcpServer } from './mcp/server.ts';
+export { pipelineRules } from './pipeline/rules.ts';
+export {
+  forkRoute,
+  forkQualityGate,
+  forkStopLoss,
+  forkAcceptance,
+  forkEscalate,
+  ORCHESTRATOR,
+  GATE_ACTOR,
+} from './pipeline/forks.ts';
+export type {
+  RouteInput,
+  RouteResult,
+  QualityGateInput,
+  QualityGateResult,
+  StopLossInput,
+  StopLossResult,
+  AcceptanceInput,
+  AcceptanceResult,
+  EscalateInput,
+  EscalateResult,
+  RiskTier,
+} from './pipeline/forks.ts';
+export { Orchestrator, createPipelineKernel } from './pipeline/orchestrator.ts';
+export type {
+  OrchestratorOptions,
+  WorkerRunContext,
+  WorkerOutput,
+  VigilWorker,
+  TaskReport,
+  TaskStatus,
+} from './pipeline/orchestrator.ts';
 export { classifyToolCall, buildQuestions, resolveSessionId } from './hook/mapping.ts';
 export type { Classification, HookPayload } from './hook/mapping.ts';
 export { runClaudeHook } from './hook/claude.ts';

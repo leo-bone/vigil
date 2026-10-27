@@ -11,10 +11,19 @@ import { sha256 } from '../util/canonical.ts';
 export class MockJudge implements Judge {
   readonly name = 'mock';
   #fixed: Record<string, number>;
+  #choices: Record<string, string | ((state: string) => string)>;
   #latencyMs: number;
 
-  constructor(options: { fixed?: Record<string, number>; latencyMs?: number } = {}) {
+  constructor(
+    options: {
+      fixed?: Record<string, number>;
+      /** 指定答案；值可以是字符串，也可以根据 state 动态决定（如按任务路由到不同工人） */
+      choices?: Record<string, string | ((state: string) => string)>;
+      latencyMs?: number;
+    } = {},
+  ) {
     this.#fixed = options.fixed ?? {};
+    this.#choices = options.choices ?? {};
     this.#latencyMs = options.latencyMs ?? 1;
   }
 
@@ -37,17 +46,34 @@ export class MockJudge implements Judge {
     }
     if (q.type === 'choice') {
       const labels = Object.keys(q.criteria ?? { ok: 'ok', bad: 'bad' });
-      const index = Math.min(labels.length - 1, Math.floor(value * labels.length));
-      judgment.choice = labels[index]!;
+      let index: number;
+      const pinned = this.#choices[q.name];
+      const pinnedChoice = typeof pinned === 'function' ? pinned(state) : pinned;
+      if (pinnedChoice !== undefined) {
+        // 指定答案照单全收，哪怕是名册外的 —— 正好用它模拟"模型选了个不存在的人"
+        index = labels.indexOf(pinnedChoice);
+        judgment.choice = pinnedChoice;
+      } else {
+        index = Math.min(labels.length - 1, Math.floor(value * labels.length));
+        judgment.choice = labels[index]!;
+      }
       const share = 1 / labels.length;
-      judgment.probabilities = Object.fromEntries(
-        labels.map((label, i) => [label, i === index ? Math.max(share, 0.55) : (1 - Math.max(share, 0.55)) / Math.max(1, labels.length - 1)]),
-      );
-      judgment.confidence = Math.max(share, 0.55);
+      // 兜底也该有主见：赢家 0.75，其余平摊 —— 否则多选项永远过不了置信门槛
+      const winner = Math.max(share, 0.75);
+      const entries: Array<[string, number]> = labels.map((label, i) => [
+        label,
+        i === index ? winner : (1 - winner) / Math.max(1, labels.length - 1),
+      ]);
+      if (index < 0 && judgment.choice) entries.push([judgment.choice, winner]);
+      judgment.probabilities = Object.fromEntries(entries);
+      judgment.confidence = winner;
       return judgment;
     }
     const levels = q.scale?.length ?? 5;
-    const score = Math.min(levels, 1 + Math.floor(value * levels));
+    const pinnedScore = this.#fixed[q.name];
+    const score = pinnedScore !== undefined
+      ? Math.min(levels, Math.max(1, Math.round(pinnedScore)))
+      : Math.min(levels, 1 + Math.floor(value * levels));
     judgment.score = score;
     judgment.confidence = 0.7;
     return judgment;

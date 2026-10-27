@@ -158,7 +158,8 @@ test('事后梳理能算出虚假完成率与可追溯率', async () => {
   const report = postmortem(kernel.ledger, 's1');
   assert.equal(report.decisions, 2);
   assert.equal(report.chainOk, true);
-  assert.equal(report.metrics.traceableRate, 0.5);
+  // 可追溯率只统计对外动作：ok2 的 action 不是 external，不纳入分母
+  assert.equal(report.metrics.traceableRate, 1);
   assert.equal(report.metrics.falseDoneRate, 0.5);
   assert.equal(report.falsified.length, 1);
 });

@@ -152,15 +152,19 @@ export const defaultRules: Rule[] = [
   },
   {
     id: 'evidence.unverified',
-    description: '依赖未核验的证据',
+    description: '全部证据都未核验',
     severity: 'escalate',
     check: (req) => {
-      const unverified = (req.evidence ?? []).filter((e) => e.verified === false);
-      if (unverified.length === 0) return null;
+      const evidence = req.evidence ?? [];
+      if (evidence.length === 0) return null;
+      // 只在没有任何一份已核验证据时才拦：
+      // "草稿证据 + 独立核验记录"是正常形态，混着出现不该挡路。
+      const verified = evidence.filter((e) => e.verified === true);
+      if (verified.length > 0) return null;
       return {
         rule: 'evidence.unverified',
         severity: 'escalate',
-        detail: `${unverified.length} 份证据标记为未核验：${unverified.map((e) => e.id).join(', ')}`,
+        detail: `全部 ${evidence.length} 份证据都未核验：${evidence.map((e) => e.id).join(', ')}`,
       };
     },
   },

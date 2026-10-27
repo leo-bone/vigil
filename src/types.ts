@@ -111,6 +111,11 @@ export interface DecisionRequest {
   questions?: JudgeQuestion[];
   /** 本次动作产生的成本，用于会话预算核算 */
   costUsd?: number;
+  /**
+   * 岔路附带的确定性上下文（重试计数、验收清单等）。
+   * 流水线规则只在这里有对应字段时才生效，普通请求完全不受影响。
+   */
+  extras?: Record<string, unknown>;
 }
 
 export interface Verdict {

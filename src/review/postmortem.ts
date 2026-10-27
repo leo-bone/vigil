@@ -99,7 +99,9 @@ export function postmortem(ledger: Ledger, sessionId: string): Postmortem {
     .filter((r) => r.action.external && r.evidenceIds.length === 0)
     .map((r) => `第 ${r.seq} 步「${r.intent}」对外动作没有任何证据支撑`);
 
-  const traceable = allow.filter((r) => r.evidenceIds.length > 0).length;
+  // 可追溯率只统计对外动作：内部岔路（路由/质量门/止损）本就不需要证据链
+  const externalAllow = allow.filter((r) => r.action.external);
+  const traceable = externalAllow.filter((r) => r.evidenceIds.length > 0).length;
   const falseDone = allow.filter((r) => r.label === 'wrong').length;
 
   const findings: string[] = [];
@@ -114,7 +116,7 @@ export function postmortem(ledger: Ledger, sessionId: string): Postmortem {
   if (deniedByAuthority.length > 0) {
     findings.push(`${deniedByAuthority.length} 次因金额规则被拦，考虑收紧该 actor 的预算或改走人工审批。`);
   }
-  if (allow.length > 0 && traceable / allow.length < 0.8) {
+  if (externalAllow.length > 0 && traceable / externalAllow.length < 0.8) {
     findings.push(`可追溯率仅 ${((traceable / allow.length) * 100).toFixed(0)}%，建议把证据要求从"鼓励"改成"必须"。`);
   }
   if (findings.length === 0) findings.push('未发现结构性问题。');
@@ -132,7 +134,7 @@ export function postmortem(ledger: Ledger, sessionId: string): Postmortem {
       allowRate: records.length ? allow.length / records.length : 0,
       escalateRate: records.length ? escalate.length / records.length : 0,
       denyRate: records.length ? deny.length / records.length : 0,
-      traceableRate: allow.length ? traceable / allow.length : 0,
+      traceableRate: externalAllow.length ? traceable / externalAllow.length : 1,
       falseDoneRate: allow.length ? falseDone / allow.length : 0,
       labeled: labeled.length,
     },
