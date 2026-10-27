@@ -20,6 +20,18 @@ import { CONFIG_BASENAME, loadPolicyConfig, savePolicyConfig } from './policy/co
 import { Orchestrator, createPipelineKernel } from './pipeline/orchestrator.ts';
 import { arbitrate } from './pipeline/arbiter.ts';
 import type { Position } from './pipeline/arbiter.ts';
+import { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
+import {
+  PACKS_DIR,
+  installPack,
+  loadPackFile,
+  loadPacks,
+  mergePackPolicy,
+  packToRules,
+} from './policy/pack.ts';
+import type { RulePack } from './policy/pack.ts';
+import { defaultRules } from './policy/rules.ts';
+import type { Rule } from './policy/rules.ts';
 import type { Judge } from './judge/index.ts';
 import type { ActionSpec } from './types.ts';
 import {
@@ -106,22 +118,47 @@ function buildJudge(): Judge {
   return new MockJudge(mockOptions());
 }
 
-function buildKernel(policy?: PolicyContext): Kernel {
+function buildKernel(policy?: PolicyContext, extraRules: Rule[] = []): Kernel {
   const ledger = buildLedger();
   const judge = buildJudge();
-  return new Kernel({ ledger, judge, policy, shapeThresholds: loadShapeThresholds() });
+  return new Kernel({
+    ledger,
+    judge,
+    policy,
+    rules: extraRules.length > 0 ? [...defaultRules, ...extraRules] : [],
+    shapeThresholds: loadShapeThresholds(),
+  });
 }
 
 /**
- * 实际生效的策略：内置保守默认 ← 覆盖以 vigil.config.json。
+ * 实际生效的策略：内置保守默认 ← 规则包收紧 ← 配置文件覆盖。
  *
- * 顺序很重要：配置文件只能收紧或调整默认值，不能凭空造出一套策略，
- * 这样即使文件被删掉，内核仍然是有策略的。
+ * 顺序很重要：配置文件只能覆盖它明确写了的部分，
+ * 这样即使文件被删掉、规则包被卸掉，内核仍然是有策略的。
  */
 function currentPolicy(): PolicyContext {
+  const base = hookPolicy();
+  const packed = installedPacks().packs.reduce((policy, pack) => mergePackPolicy(policy, pack), base);
   const config = loadPolicyConfig(CONFIG_PATH);
-  if (!config) return hookPolicy();
-  return hookPolicy(config);
+  if (!config) return packed;
+  return {
+    ...packed,
+    ...config,
+    grants: config.grants ?? packed.grants,
+    denylistTargets: config.denylistTargets ?? packed.denylistTargets,
+  };
+}
+
+/** 已安装的规则包（.vigil/packs 下的 JSON） */
+function installedPacks(): { packs: RulePack[]; errors: string[] } {
+  return loadPacks(process.env.VIGIL_PACKS ?? PACKS_DIR);
+}
+
+/** 规则包带来的确定性规则 */
+function packRules(): Rule[] {
+  const { packs, errors } = installedPacks();
+  for (const error of errors) process.stderr.write(`[vigil] 规则包加载失败：${error}\n`);
+  return packs.flatMap((pack) => packToRules(pack));
 }
 
 async function readStdin(): Promise<string> {
@@ -156,6 +193,7 @@ function usage(): void {
   process.stdout.write(`vigil — AI 决策账本与熔断内核
 
 用法：
+  vigil rules list|show|check|install   规则包：查看、校验、安装
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
   vigil arbitrate <文件.json|->    多 agent 结论冲突时定夺
   vigil decide <文件.json|->     请求裁决，结果写入账本
@@ -181,6 +219,7 @@ function usage(): void {
   VIGIL_MOCK_FIXED     给 MockJudge 喂剧本，如 {"progress":4,"quality_sufficient":0.9}
   VIGIL_MOCK_CHOICES   给 MockJudge 指定选择题答案，如 {"next_worker":"bot/writer"}
   VIGIL_LEDGER         账本路径，默认 .vigil/ledger.ndjson
+  VIGIL_PACKS          规则包目录，默认 .vigil/packs
   VIGIL_CONFIG         策略配置路径，默认 vigil.config.json
   VIGIL_SIGNING_KEY    签名密钥路径，默认 .vigil/signing-key.json
   VIGIL_THRESHOLDS     按题型阈值配置，默认 .vigil/thresholds.json
@@ -200,7 +239,7 @@ async function main(): Promise<void> {
       if (!source || source === '-') raw = await readStdin();
       else raw = readFileSync(source, 'utf8');
       const request = JSON.parse(raw) as DecisionRequest;
-      const kernel = buildKernel();
+      const kernel = buildKernel(currentPolicy(), packRules());
       const verdict = await kernel.decide(request);
       process.stdout.write(`${JSON.stringify(verdict, null, 2)}\n`);
       if (verdict.outcome !== 'allow') process.exitCode = 2;
@@ -471,6 +510,83 @@ async function main(): Promise<void> {
       return;
     }
 
+    case 'rules': {
+      const sub = rest[0] ?? 'list';
+      const dir = process.env.VIGIL_PACKS ?? PACKS_DIR;
+      const installed = loadPacks(dir);
+
+      if (sub === 'list') {
+        process.stdout.write('内置规则包（用 vigil rules install <id> 安装）：\n');
+        for (const pack of BUILTIN_PACKS) {
+          const mark = installed.packs.some((item) => item.id === pack.id) ? '✓ 已安装' : '  未安装';
+          process.stdout.write(`  ${pad(pack.id, 32)}${pad(mark, 12)}${pack.name}\n`);
+          process.stdout.write(`  ${' '.repeat(32)}${pack.description ?? ''}\n`);
+        }
+        process.stdout.write(`\n已安装目录：${dir}\n`);
+        if (installed.packs.length > 0) {
+          process.stdout.write('\n已安装的规则包：\n');
+          for (const pack of installed.packs) {
+            process.stdout.write(`  ${pad(pack.id, 32)}${pad(`${pack.rules.length} 条`, 12)}${pack.name}\n`);
+          }
+        }
+        for (const error of installed.errors) {
+          process.stdout.write(`\n⚠ 加载失败：${error}\n`);
+        }
+        return;
+      }
+
+      if (sub === 'show') {
+        const id = rest[1];
+        if (!id) throw new Error('用法：vigil rules show <id>');
+        const pack = installed.packs.find((item) => item.id === id) ?? findBuiltinPack(id);
+        if (!pack) throw new Error(`找不到规则包：${id}`);
+        if (rest.includes('--json')) {
+          process.stdout.write(`${JSON.stringify(pack, null, 2)}\n`);
+          return;
+        }
+        process.stdout.write(`${pack.name}（${pack.id}${pack.version ? ` v${pack.version}` : ''}）\n`);
+        if (pack.appliesTo) process.stdout.write(`适用：${pack.appliesTo}\n`);
+        if (pack.description) process.stdout.write(`说明：${pack.description}\n`);
+        process.stdout.write('\n规则：\n');
+        for (const rule of pack.rules) {
+          process.stdout.write(`  [${rule.severity === 'deny' ? '否决' : '升级'}] ${rule.id}\n`);
+          process.stdout.write(`      ${rule.description}\n`);
+        }
+        if (pack.policy) {
+          process.stdout.write('\n策略补丁：\n');
+          for (const [key, value] of Object.entries(pack.policy)) {
+            process.stdout.write(`  ${key}: ${JSON.stringify(value)}\n`);
+          }
+        }
+        return;
+      }
+
+      if (sub === 'check') {
+        const file = rest[1];
+        if (!file) throw new Error('用法：vigil rules check <文件.json>');
+        const pack = loadPackFile(file);
+        process.stdout.write(`✓ ${pack.id} 校验通过：${pack.rules.length} 条规则\n`);
+        for (const rule of pack.rules) {
+          process.stdout.write(`  ${rule.severity === 'deny' ? '否决' : '升级'} ${rule.id} —— ${rule.description}\n`);
+        }
+        return;
+      }
+
+      if (sub === 'install') {
+        const target = rest[1];
+        if (!target) throw new Error('用法：vigil rules install <内置包 id | 文件.json>');
+        const pack = findBuiltinPack(target) ?? loadPackFile(target);
+        const result = installPack(pack, dir, rest.includes('--force'));
+        process.stdout.write(
+          `已${result.replaced ? '覆盖' : '安装'}规则包 ${pack.id}（${pack.rules.length} 条规则）→ ${result.path}\n`,
+        );
+        process.stdout.write('下次启动内核时生效。\n');
+        return;
+      }
+
+      throw new Error(`未知的子命令：${sub}。可用：list / show / check / install`);
+    }
+
     case 'mcp': {
       // 统筹循环与仲裁用带流水线规则的内核（验收清单、仲裁结论等确定性规则），
       // 与对外动作的内核共用同一本账本。
@@ -480,9 +596,11 @@ async function main(): Promise<void> {
         ledger,
         judge,
         policy: currentPolicy(),
+        rules: [...defaultRules, ...packRules()],
         shapeThresholds: loadShapeThresholds(),
       });
       const pipelineKernel = createPipelineKernel(ledger, judge, currentPolicy(), {
+        rules: packRules(),
         shapeThresholds: loadShapeThresholds(),
       });
       const orchestrator = new Orchestrator(pipelineKernel);
@@ -506,6 +624,7 @@ async function main(): Promise<void> {
       const ledger = buildLedger();
       const judge = buildJudge();
       const pipelineKernel = createPipelineKernel(ledger, judge, currentPolicy(), {
+        rules: packRules(),
         shapeThresholds: loadShapeThresholds(),
       });
       const result = await arbitrate(pipelineKernel, {
@@ -537,7 +656,7 @@ async function main(): Promise<void> {
     case 'hook': {
       const target = rest[0];
       if (target !== 'claude') throw new Error(`不支持的钩子目标：${target ?? '(空)'}。目前支持：claude`);
-      await runClaudeHook(buildKernel(currentPolicy()), {
+      await runClaudeHook(buildKernel(currentPolicy(), packRules()), {
         shadow: rest.includes('--shadow'),
         timeoutMs: process.env.VIGIL_HOOK_TIMEOUT ? Number(process.env.VIGIL_HOOK_TIMEOUT) : undefined,
         actor: process.env.VIGIL_ACTOR,
@@ -549,7 +668,7 @@ async function main(): Promise<void> {
       const separator = rest.indexOf('--');
       const command = (separator >= 0 ? rest.slice(separator + 1) : rest).join(' ').trim();
       if (!command) throw new Error('用法：vigil run -- <命令>');
-      const code = await runWrapped(buildKernel(currentPolicy()), command, {
+      const code = await runWrapped(buildKernel(currentPolicy(), packRules()), command, {
         shadow: process.env.VIGIL_SHADOW === '1',
         actor: process.env.VIGIL_ACTOR,
       });

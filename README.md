@@ -121,7 +121,7 @@ node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
 node examples/resumable.ts   # 可续跑统筹循环：外部 agent 扮演工人，跨调用跑完
 node examples/arbiter.ts     # 冲突仲裁：四个案例走完仲裁阶梯的每一级
-npm test                     # 68 个测试
+npm test                     # 76 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -171,6 +171,30 @@ vigil scan --write        # 把建议策略写进 vigil.config.json，立即生�
 `--write` 生成的 `vigil.config.json` 会被内核在启动时读取并立即生效
 （`VIGIL_CONFIG` 可改路径）。配置文件只能**收紧**内置默认策略，删掉它就回到保守默认值。
 
+### 规则包 —— 事故形态可以搬运
+
+护城河不在代码，在规则库。所以规则库必须能被抄走、被搬运、被非工程师维护。
+
+规则包是**声明式 JSON，不是代码** —— 装进流程的东西不会执行任何代码，
+即使来源不可信，它最多让一条规则永远命中：
+
+```bash
+vigil rules list                              # 有哪些包
+vigil rules show healthcare.patient-data      # 看细节
+vigil rules check ./my-pack.json              # 校验，不安装
+vigil rules install healthcare.patient-data   # 安装，下次启动生效
+```
+
+内置四个行业包：医疗患者数据、付款审批、多租户隔离、代码发布。
+完整格式见 [`docs/rule-packs.md`](docs/rule-packs.md)。
+
+| 特性 | 为什么这么定 |
+|---|---|
+| 不用正则，只用子串和 `*` 通配 | 规则包可能来自外部，正则的 ReDoS 能卡死你的进程 |
+| 规则的 `detail` 强制写清"为什么拦" | 复盘时要看得懂，规则过时时要知道改哪条 |
+| `deny` 和 `escalate` 分开 | 否决是确定的；升级要占一个人，只有需要人判断时才用 |
+| 包的 `policy` 只收紧、不放松 | 授权是 `grants` 的事，规则包最多收紧它 |
+
 ### 钩子 —— 让约定变成强制（推荐）
 
 提示词里写"发邮件前请确认"，模型抽风时就失效了。所以判断点必须放在**执行边界**上：
@@ -212,6 +236,7 @@ vigil run -- npm test          # 退出码 0，正常执行
 ### CLI
 
 ```bash
+vigil rules list|show|check|install   规则包：查看、校验、安装
 vigil scan [目录] --write      # 扫描 agent 能力并生成治理配置（--write 立即生效）
 vigil arbitrate <文件.json|->  多 agent 结论冲突时定夺
 vigil decide request.json     # 或从 stdin 读：vigil decide -
@@ -395,7 +420,7 @@ const report = await company.runTask('sess_1', 'task_1', '写一份行业调研'
 - [x] `vigil scan` 上手工具：扫描能力清单与风险，一键生成生效的治理配置
 - [x] 统筹循环接入 MCP（可续跑状态机，外部 agent 扮演工人）
 - [x] 冲突仲裁 `Arbiter`：证据与权级定夺，未被驳倒的否决立场绝不放行
-- [ ] 规则包市场：把每个行业的事故形态沉淀成可复用规则集
+- [x] 规则包（声明式 JSON，4 个内置行业包，可安装可校验）
 - [ ] 存储层换 libsql，支持并发
 
 ## License

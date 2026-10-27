@@ -75,6 +75,20 @@ export type {
   Resolution,
   Conclusion,
 } from './pipeline/arbiter.ts';
+export { globMatch, matchesCondition, hasAnyField } from './policy/dsl.ts';
+export type { Condition } from './policy/dsl.ts';
+export {
+  parseRulePack,
+  packToRules,
+  mergePackPolicy,
+  loadPackFile,
+  loadPacks,
+  installPack,
+  RulePackError,
+  PACKS_DIR,
+} from './policy/pack.ts';
+export type { RulePack, DeclarativeRule } from './policy/pack.ts';
+export { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
 export { classifyToolCall, buildQuestions, resolveSessionId, analyzeShell } from './hook/mapping.ts';
 export type { Classification, HookPayload, ShellRisk } from './hook/mapping.ts';
 export { runClaudeHook } from './hook/claude.ts';

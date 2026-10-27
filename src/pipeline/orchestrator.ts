@@ -475,7 +475,8 @@ export function createPipelineKernel(
     ledger,
     judge,
     policy,
-    rules: [...defaultRules, ...pipelineRules],
     ...options,
+    // options.rules 里传的是"额外规则"（比如规则包带来的），不会覆盖基础规则
+    rules: [...defaultRules, ...pipelineRules, ...(options.rules ?? [])],
   });
 }
