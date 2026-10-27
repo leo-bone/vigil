@@ -27,6 +27,7 @@
     "demo": "node examples/demo.ts",
     "demo:company": "node examples/company.ts",
     "demo:resumable": "node examples/resumable.ts",
+    "demo:arbiter": "node examples/arbiter.ts",
     "dev": "node src/cli.ts",
     "mcp": "node src/cli.ts mcp",
     "test": "node --test tests/*.test.ts",

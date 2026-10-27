@@ -1,9 +1,11 @@
 import { createInterface } from 'node:readline';
 import type { Kernel } from '../kernel.ts';
-import type { DecisionRequest, Evidence, OutcomeLabel } from '../types.ts';
+import type { ActionSpec, DecisionRequest, Evidence, OutcomeLabel } from '../types.ts';
 import { postmortem } from '../review/postmortem.ts';
 import { calibrate } from '../review/calibrate.ts';
 import { scanAlerts } from '../alerts.ts';
+import { arbitrate } from '../pipeline/arbiter.ts';
+import type { Position } from '../pipeline/arbiter.ts';
 import type { Orchestrator, PipelineState } from '../pipeline/orchestrator.ts';
 
 interface JsonRpcRequest {
@@ -198,6 +200,49 @@ const TOOLS = [
       properties: { taskId: { type: 'string' } },
     },
   },
+  {
+    name: 'vigil_arbitrate',
+    description:
+      '多个 agent 对同一件事结论相反时，用它定夺。仲裁阶梯固定：立场一致直接采纳；动作触红线一律否决；有否决立场且证据或权级占优则采信否决；分不出高下就交人工。模型只在"可以继续"与"需要人看"之间排序，且永远不能把否决变成放行。',
+    inputSchema: {
+      type: 'object',
+      required: ['question', 'positions', 'action'],
+      properties: {
+        question: { type: 'string', description: '争议的是什么' },
+        sessionId: { type: 'string', description: '会话 id，不填则自动生成' },
+        taskId: { type: 'string' },
+        positions: {
+          type: 'array',
+          description: '各方的立场',
+          items: {
+            type: 'object',
+            required: ['actor', 'conclusion', 'reason'],
+            properties: {
+              actor: { type: 'string', description: '提出结论的 agent' },
+              conclusion: { type: 'string', enum: ['allow', 'deny', 'require_human'] },
+              reason: { type: 'string', description: '给出理由，仲裁记录里必须留着' },
+              evidence: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['id', 'producedBy'],
+                  properties: {
+                    id: { type: 'string' },
+                    producedBy: { type: 'string' },
+                    claim: { type: 'string' },
+                    verified: { type: 'boolean' },
+                    uri: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+        action: ACTION_SCHEMA,
+        forceEscalation: { type: 'boolean', description: '强制升级，跳过模型排序' },
+      },
+    },
+  },
 ];
 
 function textResult(payload: unknown) {
@@ -224,22 +269,34 @@ function stateSummary(state: PipelineState | undefined): unknown {
   };
 }
 
+/**
+ * 传给 MCP 服务端的附加能力。
+ *
+ * 统筹循环和仲裁都需要带流水线规则的内核（验收清单、仲裁结论等确定性规则），
+ * 与对外动作用的内核共用同一本账本。
+ */
+export interface McpOptions {
+  orchestrator?: Orchestrator;
+  pipelineKernel?: Kernel;
+}
+
 /** 导出以便测试直接驱动协议层，不必起子进程 */
 export async function handleMcpRequest(
   method: string,
   params: Record<string, unknown>,
   kernel: Kernel,
-  orchestrator?: Orchestrator,
+  options: McpOptions = {},
 ): Promise<unknown> {
-  return handle(method, params, kernel, orchestrator);
+  return handle(method, params, kernel, options);
 }
 
 async function handle(
   method: string,
   params: Record<string, unknown>,
   kernel: Kernel,
-  orchestrator?: Orchestrator,
+  options: McpOptions = {},
 ): Promise<unknown> {
+  const { orchestrator, pipelineKernel } = options;
   switch (method) {
     case 'initialize':
       return {
@@ -313,6 +370,33 @@ async function handle(
           if (!state) throw new Error(`未知任务 ${taskId}`);
           return textResult(stateSummary(state));
         }
+        case 'vigil_arbitrate': {
+          const arbiterKernel = pipelineKernel ?? kernel;
+          const positions = (args.positions ?? []) as Position[];
+          if (positions.length === 0) throw new Error('至少要有一个立场才能仲裁');
+          const result = await arbitrate(arbiterKernel, {
+            sessionId: String(args.sessionId ?? `sess_arb_${Date.now().toString(36)}`),
+            taskId: args.taskId as string | undefined,
+            question: String(args.question ?? ''),
+            positions,
+            action: (args.action ?? { kind: 'arbitrate', reversible: true, external: false }) as ActionSpec,
+            forceEscalation: args.forceEscalation as boolean | undefined,
+          });
+          return textResult({
+            decision: result.decision,
+            resolution: result.resolution,
+            winner: result.winner,
+            overruled: result.overruled.map((position) => ({
+              actor: position.actor,
+              conclusion: position.conclusion,
+              reason: position.reason,
+            })),
+            reason: result.reason,
+            usedJudge: result.usedJudge,
+            decisionId: result.verdict.decisionId,
+            recordHash: result.verdict.recordHash,
+          });
+        }
         default:
           throw new Error(`未知工具：${name}`);
       }
@@ -329,10 +413,11 @@ async function handle(
  * 协议只实现 initialize / tools/list / tools/call / ping，
  * 这已经覆盖了 99% 的客户端场景。
  *
- * 传入 orchestrator 就同时开放统筹循环的三个工具，
- * 外部 agent 可以扮演工人，把整条决策回路跑起来。
+ * 传入 options.orchestrator 就同时开放统筹循环的三个工具，
+ * 传入 options.pipelineKernel 就开放仲裁工具。外部 agent 可以扮演工人，
+ * 把整条决策回路跑起来。
  */
-export function startMcpServer(kernel: Kernel, orchestrator?: Orchestrator): void {
+export function startMcpServer(kernel: Kernel, options: McpOptions = {}): void {
   const rl = createInterface({ input: process.stdin });
   let queue: Promise<void> = Promise.resolve();
 
@@ -353,7 +438,7 @@ export function startMcpServer(kernel: Kernel, orchestrator?: Orchestrator): voi
       // 通知类消息没有 id，不需要回包
       if (message.id === undefined) return;
       try {
-        const result = await handle(message.method, message.params ?? {}, kernel, orchestrator);
+        const result = await handle(message.method, message.params ?? {}, kernel, options);
         write({ jsonrpc: '2.0', id: message.id, result });
       } catch (error) {
         write({

@@ -113,7 +113,7 @@ async function call(
     'tools/call',
     { name, arguments: args },
     kernel,
-    orchestrator,
+    { orchestrator, pipelineKernel: kernel },
   )) as { content: Array<{ text: string }> };
   return JSON.parse(result.content[0]!.text);
 }
@@ -121,7 +121,7 @@ async function call(
 test('MCP：统筹循环的三个工具都能用，且回路可跨调用跑完', async () => {
   const { kernel, orchestrator } = setup();
 
-  const list = (await handleMcpRequest('tools/list', {}, kernel, orchestrator)) as {
+  const list = (await handleMcpRequest('tools/list', {}, kernel, { orchestrator })) as {
     tools: Array<{ name: string }>;
   };
   const names = list.tools.map((tool) => tool.name);

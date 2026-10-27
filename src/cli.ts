@@ -18,7 +18,10 @@ import { toOtelJsonl } from './otel.ts';
 import { scanProject, prioritize } from './scan/index.ts';
 import { CONFIG_BASENAME, loadPolicyConfig, savePolicyConfig } from './policy/config.ts';
 import { Orchestrator, createPipelineKernel } from './pipeline/orchestrator.ts';
+import { arbitrate } from './pipeline/arbiter.ts';
+import type { Position } from './pipeline/arbiter.ts';
 import type { Judge } from './judge/index.ts';
+import type { ActionSpec } from './types.ts';
 import {
   generateSigningIdentity,
   loadSigningIdentity,
@@ -154,6 +157,7 @@ function usage(): void {
 
 用法：
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
+  vigil arbitrate <文件.json|->    多 agent 结论冲突时定夺
   vigil decide <文件.json|->     请求裁决，结果写入账本
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
   vigil hook claude [--shadow]  作为 Claude Code 的 PreToolUse 钩子运行
@@ -468,7 +472,7 @@ async function main(): Promise<void> {
     }
 
     case 'mcp': {
-      // 统筹循环用带流水线规则的内核（验收清单、重试上限、自产自验识别），
+      // 统筹循环与仲裁用带流水线规则的内核（验收清单、仲裁结论等确定性规则），
       // 与对外动作的内核共用同一本账本。
       const ledger = buildLedger();
       const judge = buildJudge();
@@ -478,10 +482,55 @@ async function main(): Promise<void> {
         policy: currentPolicy(),
         shapeThresholds: loadShapeThresholds(),
       });
-      const orchestrator = new Orchestrator(
-        createPipelineKernel(ledger, judge, currentPolicy(), { shapeThresholds: loadShapeThresholds() }),
-      );
-      startMcpServer(kernel, orchestrator);
+      const pipelineKernel = createPipelineKernel(ledger, judge, currentPolicy(), {
+        shapeThresholds: loadShapeThresholds(),
+      });
+      const orchestrator = new Orchestrator(pipelineKernel);
+      startMcpServer(kernel, { orchestrator, pipelineKernel });
+      return;
+    }
+
+    case 'arbitrate': {
+      const source = rest[0];
+      let raw: string;
+      if (!source || source === '-') raw = await readStdin();
+      else raw = readFileSync(source, 'utf8');
+      const input = JSON.parse(raw) as {
+        sessionId?: string;
+        taskId?: string;
+        question?: string;
+        positions?: Position[];
+        action?: ActionSpec;
+        forceEscalation?: boolean;
+      };
+      const ledger = buildLedger();
+      const judge = buildJudge();
+      const pipelineKernel = createPipelineKernel(ledger, judge, currentPolicy(), {
+        shapeThresholds: loadShapeThresholds(),
+      });
+      const result = await arbitrate(pipelineKernel, {
+        sessionId: input.sessionId ?? `sess_arb_${Date.now().toString(36)}`,
+        taskId: input.taskId,
+        question: input.question ?? '未说明争议内容',
+        positions: input.positions ?? [],
+        action: input.action ?? { kind: 'arbitrate', reversible: true, external: false },
+        forceEscalation: input.forceEscalation,
+      });
+      if (rest.includes('--json')) {
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      } else {
+        process.stdout.write(`仲裁结论：${result.decision}\n`);
+        process.stdout.write(`走的阶梯：${result.resolution}\n`);
+        process.stdout.write(`理由：${result.reason}\n`);
+        if (result.winner) {
+          process.stdout.write(`采信：${result.winner.actor}（${result.winner.conclusion}）—— ${result.winner.reason}\n`);
+        }
+        for (const item of result.overruled) {
+          process.stdout.write(`压下：${item.actor}（${item.conclusion}）—— ${item.reason}\n`);
+        }
+        process.stdout.write(`\n决策号 ${result.verdict.decisionId}，记录哈希 ${result.verdict.recordHash.slice(0, 12)}…\n`);
+      }
+      if (result.decision !== 'allow') process.exitCode = 2;
       return;
     }
 

@@ -66,6 +66,15 @@ export type {
   RosterEntry,
 } from './pipeline/orchestrator.ts';
 export { handleMcpRequest } from './mcp/server.ts';
+export type { McpOptions } from './mcp/server.ts';
+export { arbitrate, resolveArbitration, ARBITER } from './pipeline/arbiter.ts';
+export type {
+  ArbitrationInput,
+  ArbitrationResult,
+  Position,
+  Resolution,
+  Conclusion,
+} from './pipeline/arbiter.ts';
 export { classifyToolCall, buildQuestions, resolveSessionId, analyzeShell } from './hook/mapping.ts';
 export type { Classification, HookPayload, ShellRisk } from './hook/mapping.ts';
 export { runClaudeHook } from './hook/claude.ts';

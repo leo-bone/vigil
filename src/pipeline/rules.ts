@@ -80,4 +80,34 @@ export const pipelineRules: Rule[] = [
       };
     },
   },
+  {
+    id: 'arbiter.resolution',
+    description: '仲裁结论',
+    severity: 'escalate',
+    check: (req) => {
+      const arb = req.extras?.arbitration as { resolution?: string; detail?: string } | undefined;
+      if (!arb?.resolution) return null;
+      // 三条"否决"路径是一票否决 —— 全票同意也绕不过
+      if (
+        arb.resolution === 'unanimous_deny' ||
+        arb.resolution === 'deny_evidence' ||
+        arb.resolution === 'deny_authority'
+      ) {
+        return {
+          rule: 'arbiter.resolution',
+          severity: 'deny',
+          detail: arb.detail ?? '仲裁结论为否决',
+        };
+      }
+      // 两条"分不出高下"的路径交人工
+      if (arb.resolution === 'unanimous_human' || arb.resolution === 'deny_unresolved') {
+        return {
+          rule: 'arbiter.resolution',
+          severity: 'escalate',
+          detail: arb.detail ?? '仲裁无法定夺，交人工裁决',
+        };
+      }
+      return null;
+    },
+  },
 ];

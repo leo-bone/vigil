@@ -67,6 +67,11 @@ export class Kernel {
     return this.#ledger;
   }
 
+  /** 只读的策略视图。仲裁等模块需要知道每个 actor 被授予了几级。 */
+  get policy(): PolicyContext {
+    return { ...this.#policy };
+  }
+
   get judgeName(): string {
     return this.#judge.name;
   }

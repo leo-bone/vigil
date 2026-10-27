@@ -110,6 +110,10 @@ export const defaultRules: Rule[] = [
     check: (req, ctx) => {
       if (ctx.allowAutonomousIrreversible) return null;
       if (req.action.reversible) return null;
+      // 仲裁是"对某个动作的判断"，不是"执行这个动作"。
+      // 不可逆性该由真正动手的那一环把关，这里重复拦一遍只会让仲裁永远转人工。
+      // 红线类规则（金额上限、禁止清单、密钥）不受这条豁免影响。
+      if (req.extras?.arbitration) return null;
       return {
         rule: 'action.irreversible_unattended',
         severity: 'escalate',

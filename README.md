@@ -74,6 +74,22 @@ agent 想动手  →  ┌──────────────┐  →  放
 
 「监督过程」不是独立模块：循环里每个岔路、每轮执行都是一次被哈希链记录的裁决，`postmortem(sessionId)` 能完整回放每一步为什么这么走。
 
+### 2.6 冲突仲裁：多 agent 结论相反时由谁定夺
+
+| 情况 | 谁说了算 | 依据 |
+|---|---|---|
+| 立场一致 | 直接采纳 | 无争议 |
+| 同一个 agent 的多个立场 | 取最严格的那个 | 它自己改主意不算数，取最保守的 |
+| 动作本身触红线 | **否决** | 全票同意也不行 |
+| 有否决立场，它有独立核验证据而对方没有 | 采信否决 | 证据优势 |
+| 有否决立场，它授权等级严格更高 | 采信否决 | 权级 |
+| 有否决立场，但分不出高下 | **交人工** | 证据和权级都定不了 |
+| 只剩"可以继续"与"需要人看"打架 | 模型排序 | 唯一动用模型的地方 |
+
+**一条没被驳倒的否决立场，永远不会被自动放行。** 模型没有权力把 `deny` 变成 `allow` —— 它只能帮你在"都同意放行"和"需要人看"之间排序。这是 fail-closed 在多 agent 场景的延伸。
+
+仲裁记录和普通决策记录在账本里无法区分 —— 这正是要的：仲裁也是一次决定，同样要能被追溯和复盘。
+
 ### 3. 概率判断只能是选择题
 
 Vigil 只向判断模型发送类型化问题（boolean / choice / score），永远不索取自由文本。它返回概率分布，不返回句子。这在结构上就堵死了"模型自由发挥越权"这条路。
@@ -104,7 +120,8 @@ node examples/demo.ts        # 单线场景：裁决、复盘、校准、预警
 node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑三个任务，
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
 node examples/resumable.ts   # 可续跑统筹循环：外部 agent 扮演工人，跨调用跑完
-npm test                     # 57 个测试
+node examples/arbiter.ts     # 冲突仲裁：四个案例走完仲裁阶梯的每一级
+npm test                     # 68 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -196,6 +213,7 @@ vigil run -- npm test          # 退出码 0，正常执行
 
 ```bash
 vigil scan [目录] --write      # 扫描 agent 能力并生成治理配置（--write 立即生效）
+vigil arbitrate <文件.json|->  多 agent 结论冲突时定夺
 vigil decide request.json     # 或从 stdin 读：vigil decide -
 vigil ledger                  # 列出所有决策
 vigil verify                  # 校验哈希链 + Ed25519 签名
@@ -231,11 +249,13 @@ vigil mcp
 claude mcp add vigil -- node /abs/path/to/vigil/src/cli.ts mcp
 ```
 
-暴露 9 个工具。
+暴露 10 个工具。
 
 **单点决策**（6 个）：`vigil_decide`、`vigil_postmortem`、`vigil_verify`、`vigil_alerts`、`vigil_calibrate`、`vigil_label`。
 
 **统筹循环**（3 个）：`vigil_task_start`、`vigil_task_submit`、`vigil_task_status`。
+
+**冲突仲裁**（1 个）：`vigil_arbitrate`。
 
 约定：**agent 在动手之前必须调用 `vigil_decide`，拿到 `allow` 才执行。** 这不是靠自觉，是靠 hook —— 在 `PreToolUse` 里拦。
 
@@ -374,7 +394,7 @@ const report = await company.runTask('sess_1', 'task_1', '写一份行业调研'
 - [x] OTel GenAI span 导出（进 Langfuse/Phoenix 生态）
 - [x] `vigil scan` 上手工具：扫描能力清单与风险，一键生成生效的治理配置
 - [x] 统筹循环接入 MCP（可续跑状态机，外部 agent 扮演工人）
-- [ ] 多 agent 冲突仲裁 `Arbiter`：两个 agent 结论相反时按规则表决
+- [x] 冲突仲裁 `Arbiter`：证据与权级定夺，未被驳倒的否决立场绝不放行
 - [ ] 规则包市场：把每个行业的事故形态沉淀成可复用规则集
 - [ ] 存储层换 libsql，支持并发
 

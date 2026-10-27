@@ -464,6 +464,10 @@ export function createPipelineKernel(
       { actor: 'bot/*', authority: 2 },
       { actor: 'vigil/orchestrator', authority: 2 },
       { actor: 'vigil/quality-gate', authority: 2 },
+      // 仲裁者要能对任何动作下判断，所以给到最高一级。
+      // 但它并不"动手" —— 硬规则（金额上限、禁止清单、密钥外泄）照常对它跑，
+      // 全票同意也绕不过红线。
+      { actor: 'vigil/arbiter', authority: 4 },
       ...(policyOverrides.grants ?? []),
     ],
   };
