@@ -5,10 +5,33 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import { SqliteLedger, importNdjson, Ledger, generateSigningIdentity, signBytes } from '../src/index.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const repoRoot = join(here, '..');
+
+/**
+ * 环境探测：SQLite 需要创建并删除 journal 文件。
+ *
+ * 有些环境（CI 沙箱、受限的临时目录策略）会拦截这类删除，
+ * 于是 SQLite 报 "disk I/O error" —— 那是环境问题，不是代码问题。
+ * 与其让测试假失败，不如说清楚"这里跑不了"。
+ */
+function sqliteUsable(): string | false {
+  try {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-sqlite-probe-'));
+    const db = new DatabaseSync(join(dir, 'probe.db'));
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('CREATE TABLE probe (a INTEGER)');
+    db.close();
+    return false;
+  } catch (error) {
+    return `本机环境不支持 SQLite（${error instanceof Error ? error.message : String(error)}）`;
+  }
+}
+
+const SKIP = sqliteUsable();
 
 function tempDb(): string {
   return join(mkdtempSync(join(tmpdir(), 'vigil-sqlite-')), 'ledger.db');
@@ -34,7 +57,7 @@ function sample(overrides: Record<string, unknown> = {}) {
   } as never;
 }
 
-test('SQLite 账本：写入、读取、哈希链校验', () => {
+test('SQLite 账本：写入、读取、哈希链校验', { skip: SKIP }, () => {
   const path = tempDb();
   const ledger = new SqliteLedger(path);
   ledger.append(sample({ decisionId: 'dec_1' }));
@@ -51,7 +74,7 @@ test('SQLite 账本：写入、读取、哈希链校验', () => {
   reopened.close();
 });
 
-test('SQLite 与 NDJSON 的哈希链语义一致 —— 同一串决策，两种后端链相同', () => {
+test('SQLite 与 NDJSON 的哈希链语义一致 —— 同一串决策，两种后端链相同', { skip: SKIP }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'vigil-same-'));
   const ndjson = new Ledger(join(dir, 'l.ndjson'));
   const sqlite = new SqliteLedger(join(dir, 'l.db'));
@@ -69,7 +92,7 @@ test('SQLite 与 NDJSON 的哈希链语义一致 —— 同一串决策，两种
   sqlite.close();
 });
 
-test('append 防御：调用方传了 seq/prevHash/hash 也不会污染哈希链', () => {
+test('append 防御：调用方传了 seq/prevHash/hash 也不会污染哈希链', { skip: SKIP }, () => {
   const path = tempDb();
   const ledger = new SqliteLedger(path);
   // 模拟手滑的 JS 调用方
@@ -80,7 +103,7 @@ test('append 防御：调用方传了 seq/prevHash/hash 也不会污染哈希链
   ledger.close();
 });
 
-test('签名记录迁移后仍然能验签', () => {
+test('签名记录迁移后仍然能验签', { skip: SKIP }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'vigil-migrate-'));
   const identity = generateSigningIdentity();
   const ndjsonPath = join(dir, 'l.ndjson');
@@ -104,7 +127,7 @@ test('签名记录迁移后仍然能验签', () => {
   migrated.close();
 });
 
-test('多进程并发写同一个账本：哈希链不能断', async () => {
+test('多进程并发写同一个账本：哈希链不能断', { skip: SKIP }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vigil-concurrent-'));
   const dbPath = join(dir, 'l.db');
   const writer = join(dir, 'writer.mjs');
@@ -150,7 +173,7 @@ ledger.close();
   ledger.close();
 });
 
-test('SQLite 账本：标签与审批都能落进去并读回来', () => {
+test('SQLite 账本：标签与审批都能落进去并读回来', { skip: SKIP }, () => {
   const path = tempDb();
   const ledger = new SqliteLedger(path);
   ledger.append(sample({ decisionId: 'dec_1', outcome: 'require_human' }));

@@ -51,6 +51,27 @@ const QUESTIONS_SCHEMA = {
   },
 } as const;
 
+/**
+ * 每个工具的标注。
+ *
+ * MCP 协议自己只有 readOnlyHint / destructiveHint 这两个布尔位，
+ * 生态里几乎所有 server 都只填这两个 —— 表达不了"这个动作要 L3 授权"。
+ * 我们在 annotations 里额外带一个 vigilAuthority 字段：客户端会忽略不认识的字段，
+ * 但认得它的客户端就能直接看出"调用这个工具需要什么权限"。
+ */
+const TOOL_ANNOTATIONS: Record<string, Record<string, unknown>> = {
+  vigil_decide: { title: '决策裁决', readOnlyHint: false, destructiveHint: false, idempotentHint: false, vigilAuthority: 'L0-L4', vigilEffect: '写入决策账本' },
+  vigil_postmortem: { title: '事后梳理', readOnlyHint: true, destructiveHint: false, idempotentHint: true, vigilAuthority: 'L0' },
+  vigil_verify: { title: '账本校验', readOnlyHint: true, destructiveHint: false, idempotentHint: true, vigilAuthority: 'L0' },
+  vigil_alerts: { title: '预警扫描', readOnlyHint: true, destructiveHint: false, idempotentHint: true, vigilAuthority: 'L0' },
+  vigil_calibrate: { title: '置信度校准', readOnlyHint: true, destructiveHint: false, idempotentHint: true, vigilAuthority: 'L0' },
+  vigil_label: { title: '回填标签', readOnlyHint: false, destructiveHint: false, idempotentHint: true, vigilAuthority: 'L2', vigilEffect: '追加标签事件，不改写原记录' },
+  vigil_task_start: { title: '派工', readOnlyHint: false, destructiveHint: false, idempotentHint: false, vigilAuthority: 'L2', vigilEffect: '写入任务状态与路由记录' },
+  vigil_task_submit: { title: '交回成果', readOnlyHint: false, destructiveHint: false, idempotentHint: false, vigilAuthority: 'L2', vigilEffect: '写入执行与验收记录' },
+  vigil_task_status: { title: '任务状态', readOnlyHint: true, destructiveHint: false, idempotentHint: true, vigilAuthority: 'L0' },
+  vigil_arbitrate: { title: '冲突仲裁', readOnlyHint: false, destructiveHint: false, idempotentHint: true, vigilAuthority: 'L4', vigilEffect: '写入仲裁记录，最高一级授权' },
+};
+
 const TOOLS = [
   {
     name: 'vigil_decide',
@@ -307,7 +328,13 @@ async function handle(
     case 'ping':
       return {};
     case 'tools/list':
-      return { tools: TOOLS };
+      // 每个工具带上自己的标注（授权等级、是否只读、会不会改东西）
+      return {
+        tools: TOOLS.map((tool) => ({
+          ...tool,
+          annotations: TOOL_ANNOTATIONS[tool.name] ?? {},
+        })),
+      };
     case 'tools/call': {
       const name = String(params.name ?? '');
       const args = (params.arguments ?? {}) as Record<string, unknown>;
@@ -420,6 +447,9 @@ async function handle(
 export function startMcpServer(kernel: Kernel, options: McpOptions = {}): void {
   const rl = createInterface({ input: process.stdin });
   let queue: Promise<void> = Promise.resolve();
+  // 按 MCP 规范：客户端先 initialize，收到响应后发 notifications/initialized，
+  // 之后才能调工具。实跑发现官方 server 确实要求这一步。
+  let initialized = false;
 
   const write = (message: unknown) => {
     process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -435,10 +465,22 @@ export function startMcpServer(kernel: Kernel, options: McpOptions = {}): void {
       } catch {
         return;
       }
-      // 通知类消息没有 id，不需要回包
-      if (message.id === undefined) return;
+      // 通知类消息没有 id，不回包
+      if (message.id === undefined) {
+        if (message.method === 'notifications/initialized') initialized = true;
+        return;
+      }
       try {
+        if (!initialized && message.method !== 'initialize' && message.method !== 'ping') {
+          write({
+            jsonrpc: '2.0',
+            id: message.id,
+            error: { code: -32002, message: '请先调用 initialize 完成握手' },
+          });
+          return;
+        }
         const result = await handle(message.method, message.params ?? {}, kernel, options);
+        if (message.method === 'initialize') initialized = true;
         write({ jsonrpc: '2.0', id: message.id, result });
       } catch (error) {
         write({

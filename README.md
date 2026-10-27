@@ -275,7 +275,10 @@ vigil mcp
 claude mcp add vigil -- node /abs/path/to/vigil/src/cli.ts mcp
 ```
 
-暴露 10 个工具。
+暴露 10 个工具。每个工具都带 `annotations`，含协议标准的
+`readOnlyHint` / `destructiveHint`，以及我们自有的 `vigilAuthority`
+（这个工具需要几级授权）与 `vigilEffect`（它会改什么）——
+MCP 协议本身只有两个布尔位，表达不了五级授权。
 
 **单点决策**（6 个）：`vigil_decide`、`vigil_postmortem`、`vigil_verify`、`vigil_alerts`、`vigil_calibrate`、`vigil_label`。
 
@@ -447,6 +450,7 @@ SQLite 后端用 WAL 模式 + `BEGIN IMMEDIATE`：写锁排队而不是报错，
 - [x] 冲突仲裁 `Arbiter`：证据与权级定夺，未被驳倒的否决立场绝不放行
 - [x] 规则包（声明式 JSON，4 个内置行业包，可安装可校验）
 - [x] 存储层换 SQLite（node:sqlite 内置，多进程并发写，哈希链语义不变）
+- [x] GitHub 顶级 AI 项目 Top 50 调研（[报告](docs/ai-landscape-2026-10.md)）＋ MCP 协议合规与工具授权标注
 - [ ] 规则包索引与分发：把格式变成可发现、可签名的包源
 
 ## License

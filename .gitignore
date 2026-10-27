@@ -3,3 +3,7 @@ dist/
 .vigil/
 *.log
 .DS_Store
+
+# Python tempfile 探针在 cwd 兜底时留下的空文件（内容固定是 "blat"）。
+# 某些受限环境会拦截临时文件删除，它就会赖在仓库根目录不走。
+4na5ni6a
