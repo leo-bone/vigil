@@ -14,6 +14,12 @@ export type { CalibrationReport } from './review/calibrate.ts';
 export { scanAlerts } from './alerts.ts';
 export type { Alert, AlertOptions } from './alerts.ts';
 export { startMcpServer } from './mcp/server.ts';
+export { classifyToolCall, buildQuestions, resolveSessionId } from './hook/mapping.ts';
+export type { Classification, HookPayload } from './hook/mapping.ts';
+export { runClaudeHook } from './hook/claude.ts';
+export type { ClaudeHookOptions, ClaudeHookOutput } from './hook/claude.ts';
+export { runWrapped } from './hook/run.ts';
+export { hookPolicy } from './hook/policy.ts';
 export type {
   ActionSpec,
   AuthorityLevel,

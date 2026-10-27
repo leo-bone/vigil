@@ -75,7 +75,7 @@ Vigil 只向判断模型发送类型化问题（boolean / choice / score），�
 ```bash
 git clone <this-repo> && cd vigil
 node examples/demo.ts      # 跑一遍十步场景，不需要任何 API key
-npm test                   # 10 个测试
+npm test                   # 19 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -88,7 +88,45 @@ export TYPESAFE_API_KEY=tsf_xxx
 
 没有 key 会退回确定性的 `MockJudge` —— 同样的输入永远同样的结论，适合写测试和复现事故。
 
-## 三种接入方式
+## 接入方式
+
+### 钩子 —— 让约定变成强制（推荐）
+
+提示词里写"发邮件前请确认"，模型抽风时就失效了。所以判断点必须放在**执行边界**上：
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|WebFetch|mcp__.*",
+        "hooks": [{ "type": "command", "command": "node /绝对路径/vigil/src/cli.ts hook claude", "timeout": 10 }]
+      }
+    ]
+  }
+}
+```
+
+放进 `~/.claude/settings.json` 即生效。三种结论映射：`allow` → 直接执行，`require_human` → 弹给用户确认，`deny` → 硬拦。
+
+钩子自身出故障（分类失败、超时 4 秒、载荷损坏）永远退出码 0 且不阻断 agent —— 那是我们的 bug，不该由用户承担。
+
+**上线顺序别跳**：先 `VIGIL_SHADOW=1` 跑一周，只看账本不拦截，确认误杀率可接受再开拦截。没跑过影子模式就开拦截，第二天钩子就会被关掉。
+
+完整说明见 [`docs/hooks.md`](docs/hooks.md)，配置模板见 [`examples/claude-settings.json`](examples/claude-settings.json)。
+
+### 命令包装器 —— 任何客户端都能用
+
+```bash
+vigil run -- rm -rf build      # 退出码 3，未执行
+vigil run -- npm test          # 退出码 0，正常执行
+```
+
+| 退出码 | 含义 |
+|---|---|
+| 0 | 放行并执行 |
+| 2 | 被否决 |
+| 3 | 需人工确认，未执行 |
 
 ### CLI
 
@@ -181,7 +219,8 @@ if (verdict.outcome !== 'allow') throw new Error(`被拦截：${verdict.reason}`
 - [x] 哈希链账本与校验
 - [x] 事后梳理 / 校准 / 预警
 - [x] MCP stdio 服务端（零依赖）
-- [ ] PreToolUse hook 示例（Claude Code / Cursor / Codex）
+- [x] Claude Code PreToolUse 钩子 + 通用命令包装器
+- [ ] 更多客户端的钩子适配（Cursor / Codex）
 - [ ] 多 agent 冲突仲裁 `Arbiter`：两个 agent 结论相反时按规则表决
 - [ ] 规则包市场：把每个行业的事故形态沉淀成可复用规则集
 - [ ] 存储层换 libsql，支持并发

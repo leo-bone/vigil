@@ -1,0 +1,17 @@
+{
+  "_comment": "把下面这段合并进 ~/.claude/settings.json 或项目的 .claude/settings.json。command 里的路径改成你本机的绝对路径。",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/vigil/src/cli.ts hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

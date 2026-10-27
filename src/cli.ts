@@ -8,11 +8,15 @@ import { postmortem } from './review/postmortem.ts';
 import { calibrate } from './review/calibrate.ts';
 import { scanAlerts } from './alerts.ts';
 import { startMcpServer } from './mcp/server.ts';
+import { runClaudeHook } from './hook/claude.ts';
+import { runWrapped } from './hook/run.ts';
+import { hookPolicy } from './hook/policy.ts';
+import type { PolicyContext } from './policy/rules.ts';
 import type { DecisionRequest, OutcomeLabel } from './types.ts';
 
 const LEDGER_PATH = process.env.VIGIL_LEDGER ?? '.vigil/ledger.ndjson';
 
-function buildKernel(): Kernel {
+function buildKernel(policy?: PolicyContext): Kernel {
   const ledger = new Ledger(LEDGER_PATH);
   const apiKey = process.env.TYPESAFE_API_KEY;
   const judge = apiKey
@@ -21,7 +25,7 @@ function buildKernel(): Kernel {
   if (!apiKey && process.env.VIGIL_QUIET !== '1') {
     process.stderr.write('[vigil] 未检测到 TYPESAFE_API_KEY，使用确定性 MockJudge。\n');
   }
-  return new Kernel({ ledger, judge });
+  return new Kernel({ ledger, judge, policy });
 }
 
 async function readStdin(): Promise<string> {
@@ -46,6 +50,8 @@ function usage(): void {
 
 用法：
   vigil decide <文件.json|->     请求裁决，结果写入账本
+  vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
+  vigil hook claude [--shadow]  作为 Claude Code 的 PreToolUse 钩子运行
   vigil ledger [--json]          列出全部决策
   vigil verify                   校验哈希链完整性
   vigil postmortem <sessionId>   事后梳理
@@ -58,6 +64,8 @@ function usage(): void {
   TYPESAFE_API_KEY   有则使用 Jev，无则退回 MockJudge
   VIGIL_LEDGER       账本路径，默认 .vigil/ledger.ndjson
   VIGIL_MODEL        模型名，默认 jev-latest
+  VIGIL_SHADOW=1     影子模式：只记账不拦截
+  VIGIL_ACTOR        agent 在账本里的身份，默认 agent/claude
 `);
 }
 
@@ -191,6 +199,29 @@ async function main(): Promise<void> {
 
     case 'mcp': {
       startMcpServer(buildKernel());
+      return;
+    }
+
+    case 'hook': {
+      const target = rest[0];
+      if (target !== 'claude') throw new Error(`不支持的钩子目标：${target ?? '(空)'}。目前支持：claude`);
+      await runClaudeHook(buildKernel(hookPolicy()), {
+        shadow: rest.includes('--shadow'),
+        timeoutMs: process.env.VIGIL_HOOK_TIMEOUT ? Number(process.env.VIGIL_HOOK_TIMEOUT) : undefined,
+        actor: process.env.VIGIL_ACTOR,
+      });
+      return;
+    }
+
+    case 'run': {
+      const separator = rest.indexOf('--');
+      const command = (separator >= 0 ? rest.slice(separator + 1) : rest).join(' ').trim();
+      if (!command) throw new Error('用法：vigil run -- <命令>');
+      const code = await runWrapped(buildKernel(hookPolicy()), command, {
+        shadow: process.env.VIGIL_SHADOW === '1',
+        actor: process.env.VIGIL_ACTOR,
+      });
+      process.exitCode = code;
       return;
     }
 

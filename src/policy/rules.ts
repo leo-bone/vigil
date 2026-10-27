@@ -73,11 +73,18 @@ export const defaultRules: Rule[] = [
     description: '目标命中禁止清单',
     severity: 'deny',
     check: (req, ctx) => {
-      const target = req.action.target;
-      if (!target) return null;
-      const hit = ctx.denylistTargets.find((entry) => target === entry || target.startsWith(entry));
-      if (!hit) return null;
-      return { rule: 'target.denylist', severity: 'deny', detail: `目标 ${target} 命中禁止清单 ${hit}` };
+      // 文件类动作只看路径；shell 类动作连整条命令一起看 ——
+      // 因为危险对象常常藏在参数里，不在前几个词上。
+      const haystacks: string[] = [];
+      if (req.action.target) haystacks.push(req.action.target);
+      if (req.action.kind === 'shell' && typeof req.action.payload === 'string') haystacks.push(req.action.payload);
+      for (const haystack of haystacks) {
+        const hit = ctx.denylistTargets.find((entry) => haystack === entry || haystack.startsWith(entry) || haystack.includes(entry));
+        if (hit) {
+          return { rule: 'target.denylist', severity: 'deny', detail: `目标命中禁止清单 ${hit}（${haystack.slice(0, 80)}）` };
+        }
+      }
+      return null;
     },
   },
   {
@@ -116,6 +123,8 @@ export const defaultRules: Rule[] = [
     severity: 'escalate',
     check: (req) => {
       if (!req.action.external) return null;
+      // shell 命令谈不上"证据"，它的把关靠禁止清单和不可逆判定
+      if (req.action.kind === 'shell') return null;
       const strong = (req.evidence ?? []).filter((e) => e.id);
       if (strong.length > 0) return null;
       return {
