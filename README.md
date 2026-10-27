@@ -103,7 +103,7 @@ git clone <this-repo> && cd vigil
 node examples/demo.ts        # 单线场景：裁决、复盘、校准、预警
 node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑三个任务，
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
-npm test                     # 31 个测试
+npm test                     # 49 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -117,6 +117,41 @@ export TYPESAFE_API_KEY=tsf_xxx
 没有 key 会退回确定性的 `MockJudge` —— 同样的输入永远同样的结论，适合写测试和复现事故。
 
 ## 接入方式
+
+### 先扫一遍 —— `vigil scan`
+
+治理配置不该靠人肉读文档写出来。一条命令先看清"你的 agent 到底能干什么"：
+
+```bash
+vigil scan                # 扫当前目录
+vigil scan /path/to/app   # 扫别的项目
+vigil scan --write        # 把建议策略写进 vigil.config.json，立即生效
+```
+
+它做三件事：
+
+**1. 盘能力。** 读 `.mcp.json`、`~/.claude.json`、`.cursor/mcp.json`、`.claude/settings.json`、
+`package.json` 的 scripts、根目录的 shell 脚本，给每一项推断授权等级：
+
+| 等级 | 含义 | 例子 |
+|---|---|---|
+| L0 | 只读 | `github_search_issues` |
+| L1 | 草稿 | 生成提案、写初稿 |
+| L2 | 可逆写入 | `filesystem`、本地构建脚本 |
+| L3 | 对外或不可逆 | `slack_send_message`、`git push`、`rm -rf` |
+| L4 | 资金 | `stripe`、支付类脚本 |
+
+名字看不出来的（`internal-crm`）按 L3 保守处理并标 `?`，等你确认一次，不猜。
+
+**2. 报风险。** 只报真正要动手的事：资金能力在工作目录里、
+凭据文件（`.env`）和文件访问能力同时存在、某个 server 的根目录被设成了整个 `~`、
+钩子根本没挂、账本里有 N 条升级没人批。
+
+**3. 用历史校准。** 如果账本里已有记录，它会告诉你哪类动作被否过多少次、
+高危动作是不是集中在了一个 actor 身上。这些是真实的规则验证样本。
+
+`--write` 生成的 `vigil.config.json` 会被内核在启动时读取并立即生效
+（`VIGIL_CONFIG` 可改路径）。配置文件只能**收紧**内置默认策略，删掉它就回到保守默认值。
 
 ### 钩子 —— 让约定变成强制（推荐）
 
@@ -159,6 +194,7 @@ vigil run -- npm test          # 退出码 0，正常执行
 ### CLI
 
 ```bash
+vigil scan [目录] --write      # 扫描 agent 能力并生成治理配置（--write 立即生效）
 vigil decide request.json     # 或从 stdin 读：vigil decide -
 vigil ledger                  # 列出所有决策
 vigil verify                  # 校验哈希链 + Ed25519 签名
@@ -296,7 +332,7 @@ const report = await company.runTask('sess_1', 'task_1', '写一份行业调研'
 - [x] 按题型阈值自动建议与生效（校准闭环最后一公里）
 - [x] 审批事件绑定记录哈希 + 升级回调（人工可续命）
 - [x] OTel GenAI span 导出（进 Langfuse/Phoenix 生态）
-- [ ] `vigil scan` 上手工具：扫描 agent 代码自动生成治理配置
+- [x] `vigil scan` 上手工具：扫描能力清单与风险，一键生成生效的治理配置
 - [ ] 多 agent 冲突仲裁 `Arbiter`：两个 agent 结论相反时按规则表决
 - [ ] 规则包市场：把每个行业的事故形态沉淀成可复用规则集
 - [ ] 存储层换 libsql，支持并发

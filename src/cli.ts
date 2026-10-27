@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { Ledger } from './ledger/store.ts';
 import { Kernel } from './kernel.ts';
 import { JevJudge } from './judge/jev.ts';
@@ -15,6 +15,8 @@ import { runWrapped } from './hook/run.ts';
 import { hookPolicy } from './hook/policy.ts';
 import { exportBundle } from './bundle.ts';
 import { toOtelJsonl } from './otel.ts';
+import { scanProject, prioritize } from './scan/index.ts';
+import { CONFIG_BASENAME, loadPolicyConfig, savePolicyConfig } from './policy/config.ts';
 import {
   generateSigningIdentity,
   loadSigningIdentity,
@@ -28,6 +30,7 @@ import type { DecisionRequest, OutcomeLabel } from './types.ts';
 const LEDGER_PATH = process.env.VIGIL_LEDGER ?? '.vigil/ledger.ndjson';
 const KEY_PATH = process.env.VIGIL_SIGNING_KEY ?? '.vigil/signing-key.json';
 const THRESHOLDS_PATH = process.env.VIGIL_THRESHOLDS ?? '.vigil/thresholds.json';
+const CONFIG_PATH = process.env.VIGIL_CONFIG ?? CONFIG_BASENAME;
 
 /** 有密钥文件就签名，没有就明链。密钥的出现永远是显式动作（vigil keygen）。 */
 function buildSigner(): LedgerSigner | null {
@@ -69,6 +72,18 @@ function buildKernel(policy?: PolicyContext): Kernel {
   return new Kernel({ ledger, judge, policy, shapeThresholds: loadShapeThresholds() });
 }
 
+/**
+ * 实际生效的策略：内置保守默认 ← 覆盖以 vigil.config.json。
+ *
+ * 顺序很重要：配置文件只能收紧或调整默认值，不能凭空造出一套策略，
+ * 这样即使文件被删掉，内核仍然是有策略的。
+ */
+function currentPolicy(): PolicyContext {
+  const config = loadPolicyConfig(CONFIG_PATH);
+  if (!config) return hookPolicy();
+  return hookPolicy(config);
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
@@ -86,10 +101,22 @@ function outcomeBadge(outcome: string): string {
   return '转人工';
 }
 
+function levelLabel(level: number): string {
+  const labels: Record<number, string> = {
+    0: 'L0 只读',
+    1: 'L1 草稿',
+    2: 'L2 可逆写入',
+    3: 'L3 对外/不可逆',
+    4: 'L4 资金',
+  };
+  return labels[level] ?? `L${level}`;
+}
+
 function usage(): void {
   process.stdout.write(`vigil — AI 决策账本与熔断内核
 
 用法：
+  vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
   vigil decide <文件.json|->     请求裁决，结果写入账本
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
   vigil hook claude [--shadow]  作为 Claude Code 的 PreToolUse 钩子运行
@@ -111,6 +138,7 @@ function usage(): void {
   TYPESAFE_API_KEY     有则使用 Jev；VIGIL_LOCAL_JUDGE 优先
   VIGIL_LOCAL_JUDGE    本地决策服务地址（strands-decider/laya），如 http://127.0.0.1:8000/v1/systemone
   VIGIL_LEDGER         账本路径，默认 .vigil/ledger.ndjson
+  VIGIL_CONFIG         策略配置路径，默认 vigil.config.json
   VIGIL_SIGNING_KEY    签名密钥路径，默认 .vigil/signing-key.json
   VIGIL_THRESHOLDS     按题型阈值配置，默认 .vigil/thresholds.json
   VIGIL_MODEL          模型名，默认 jev-latest
@@ -325,6 +353,81 @@ async function main(): Promise<void> {
       return;
     }
 
+    case 'scan': {
+      const target = rest.find((item) => !item.startsWith('-'));
+      const root = target ?? '.';
+      const records = existsSync(LEDGER_PATH) ? buildLedger({ publicKeyOnly: true }).all() : null;
+      const report = scanProject({ root, records });
+
+      if (rest.includes('--json')) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      } else {
+        process.stdout.write(`扫描 ${report.root}\n`);
+        process.stdout.write(`读取配置：${report.sources.length > 0 ? report.sources.join('、') : '未发现任何 agent 配置'}\n\n`);
+
+        if (report.capabilities.length > 0) {
+          // 只把真正需要看的摆出来：L3 以上、或不确认就有风险的能力。
+          // 满屏 L2 的 build/test 只会让人关掉这个命令。
+          const notable = report.capabilities
+            .filter((cap) => cap.authority >= 3 || cap.needsReview)
+            .sort((a, b) => b.authority - a.authority);
+          const quiet = report.capabilities.length - notable.length;
+
+          if (notable.length > 0) {
+            process.stdout.write('值得注意的能力：\n');
+            process.stdout.write(`${pad('等级', 18)}${pad('名称', 26)}${pad('来源', 22)}说明\n`);
+            for (const cap of notable) {
+              const badge = cap.needsReview ? `${levelLabel(cap.authority)}?` : levelLabel(cap.authority);
+              const scope = cap.scope ? `（作用域 ${cap.scope.join(' ')}）` : '';
+              process.stdout.write(
+                `${pad(badge, 18)}${pad(cap.id, 26)}${pad(cap.source, 22)}${cap.reason}${scope}\n`,
+              );
+            }
+            process.stdout.write('\n');
+          }
+          if (quiet > 0) {
+            process.stdout.write(`另有 ${quiet} 项 L2 及以下能力（本地脚本等），只在 JSON 里列出。\n\n`);
+          }
+        }
+
+        if (report.observed) {
+          const o = report.observed;
+          process.stdout.write(
+            `账本历史：${o.records} 条决策，放行 ${o.allow} / 转人工 ${o.escalate} / 否决 ${o.deny}，高危动作 ${o.highAuthority} 次，花费 ${o.spendUsd.toFixed(2)} 美元\n\n`,
+          );
+        }
+
+        if (report.findings.length > 0) {
+          process.stdout.write('发现：\n');
+          const order: Record<string, number> = { high: 0, medium: 1, low: 2, info: 3 };
+          const sorted = [...report.findings].sort((a, b) => order[a.severity]! - order[b.severity]!);
+          for (const finding of sorted) {
+            process.stdout.write(`[${finding.severity.toUpperCase()}] ${finding.title}\n  ${finding.detail}\n`);
+            if (finding.hint) process.stdout.write(`  → ${finding.hint}\n`);
+          }
+          process.stdout.write('\n');
+        }
+
+        process.stdout.write('先做这些：\n');
+        prioritize(report).forEach((line) => process.stdout.write(`  · ${line}\n`));
+
+        if (rest.includes('--write')) {
+          if (existsSync(CONFIG_PATH) && !rest.includes('--force')) {
+            process.stdout.write(`\n${CONFIG_PATH} 已存在，未覆盖。确认要重写就加 --force。\n`);
+          } else {
+            savePolicyConfig(CONFIG_PATH, report.policy);
+            process.stdout.write(`\n已写入 ${CONFIG_PATH} —— 下次启动的钩子与 run 会按它执行。\n`);
+            process.stdout.write(`单笔金额上限 ${report.policy.moneyCapPerAction} 美元，禁止清单 ${report.policy.denylistTargets.length} 项。\n`);
+          }
+        } else {
+          process.stdout.write('\n（加 --write 把上面的建议策略写进 vigil.config.json 并立即生效）\n');
+        }
+      }
+
+      if (report.findings.some((finding) => finding.severity === 'high')) process.exitCode = 2;
+      return;
+    }
+
     case 'mcp': {
       startMcpServer(buildKernel());
       return;
@@ -333,7 +436,7 @@ async function main(): Promise<void> {
     case 'hook': {
       const target = rest[0];
       if (target !== 'claude') throw new Error(`不支持的钩子目标：${target ?? '(空)'}。目前支持：claude`);
-      await runClaudeHook(buildKernel(hookPolicy()), {
+      await runClaudeHook(buildKernel(currentPolicy()), {
         shadow: rest.includes('--shadow'),
         timeoutMs: process.env.VIGIL_HOOK_TIMEOUT ? Number(process.env.VIGIL_HOOK_TIMEOUT) : undefined,
         actor: process.env.VIGIL_ACTOR,
@@ -345,7 +448,7 @@ async function main(): Promise<void> {
       const separator = rest.indexOf('--');
       const command = (separator >= 0 ? rest.slice(separator + 1) : rest).join(' ').trim();
       if (!command) throw new Error('用法：vigil run -- <命令>');
-      const code = await runWrapped(buildKernel(hookPolicy()), command, {
+      const code = await runWrapped(buildKernel(currentPolicy()), command, {
         shadow: process.env.VIGIL_SHADOW === '1',
         actor: process.env.VIGIL_ACTOR,
       });

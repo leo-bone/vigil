@@ -62,6 +62,35 @@ function scan(patterns: Pattern[], text: string): string[] {
   return patterns.filter((p) => p.re.test(text)).map((p) => p.note);
 }
 
+export interface ShellRisk {
+  destructive: string[];
+  egress: string[];
+  money: string[];
+  secrets: string[];
+  /** 四类合并后的可读说明，写进账本 */
+  notes: string[];
+}
+
+/**
+ * 一条 shell 命令的风险特征。
+ *
+ * 钩子和 `vigil scan` 共用这一份 —— 两边各写一套正则，
+ * 迟早会出现"扫描说安全、运行被拦"这种自相矛盾。
+ */
+export function analyzeShell(command: string): ShellRisk {
+  const destructive = scan(DESTRUCTIVE, command);
+  const egress = scan(EGRESS, command);
+  const money = scan(MONEY, command);
+  const secrets = SECRET_TOUCH.filter((re) => re.test(command)).map(() => '触碰凭据文件');
+  return {
+    destructive,
+    egress,
+    money,
+    secrets,
+    notes: [...destructive, ...egress, ...money, ...secrets],
+  };
+}
+
 function clip(value: unknown, max = 600): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -76,24 +105,20 @@ function clip(value: unknown, max = 600): string {
 export function classifyToolCall(payload: HookPayload): Classification {
   const toolName = payload.tool_name ?? '';
   const input = (payload.tool_input ?? {}) as Record<string, unknown>;
-  const riskNotes: string[] = [];
 
   if (/^(bash|shell|execute|run_command|terminal)/i.test(toolName)) {
     const command = String(input.command ?? input.cmd ?? '');
-    const destructive = scan(DESTRUCTIVE, command);
-    const egress = scan(EGRESS, command);
-    const money = scan(MONEY, command);
-    const secrets = SECRET_TOUCH.filter((re) => re.test(command)).map(() => '触碰凭据文件');
-    riskNotes.push(...destructive, ...egress, ...money, ...secrets);
+    const risk = analyzeShell(command);
+    const riskNotes = risk.notes;
 
     const action: ActionSpec = {
       kind: 'shell',
       target: clip(command.split(/\s+/).slice(0, 3).join(' '), 80),
       payload: clip(command),
-      reversible: destructive.length === 0,
-      external: egress.length > 0,
+      reversible: risk.destructive.length === 0,
+      external: risk.egress.length > 0,
     };
-    if (money.length > 0) action.moneyUsd = 1;
+    if (risk.money.length > 0) action.moneyUsd = 1;
 
     return {
       intent: `执行命令：${clip(command, 120)}`,
@@ -106,6 +131,7 @@ export function classifyToolCall(payload: HookPayload): Classification {
 
   if (/^(write|edit|multiedit|notebookedit|create_file|apply_patch)/i.test(toolName)) {
     const target = String(input.file_path ?? input.path ?? input.file ?? '');
+    const riskNotes: string[] = [];
     const action: ActionSpec = {
       kind: 'write_file',
       target,
@@ -130,10 +156,11 @@ export function classifyToolCall(payload: HookPayload): Classification {
       reversible: true,
       external: false,
     };
-    return { intent: `读取：${toolName}`, action, questions: [], riskNotes, classified: true };
+    return { intent: `读取：${toolName}`, action, questions: [], riskNotes: [], classified: true };
   }
 
   const external = EXTERNAL_TOOL.test(toolName);
+  const riskNotes: string[] = [];
   const action: ActionSpec = {
     kind: external ? 'outbound' : 'tool_call',
     target: toolName,

@@ -62,12 +62,23 @@ export type {
   TaskReport,
   TaskStatus,
 } from './pipeline/orchestrator.ts';
-export { classifyToolCall, buildQuestions, resolveSessionId } from './hook/mapping.ts';
-export type { Classification, HookPayload } from './hook/mapping.ts';
+export { classifyToolCall, buildQuestions, resolveSessionId, analyzeShell } from './hook/mapping.ts';
+export type { Classification, HookPayload, ShellRisk } from './hook/mapping.ts';
 export { runClaudeHook } from './hook/claude.ts';
 export type { ClaudeHookOptions, ClaudeHookOutput } from './hook/claude.ts';
 export { runWrapped } from './hook/run.ts';
 export { hookPolicy } from './hook/policy.ts';
+export { loadPolicyConfig, savePolicyConfig, parsePolicyConfig, CONFIG_BASENAME } from './policy/config.ts';
+export { scanProject, prioritize, levelHistogram } from './scan/index.ts';
+export type { ScanReport, Finding, ObservedSummary, ScanOptions, Severity } from './scan/index.ts';
+export {
+  inferAuthority,
+  classifyMcpServer,
+  classifyScript,
+  extractScope,
+  describeLevel,
+} from './scan/classify.ts';
+export type { Capability, CapabilityKind, InferredLevel, McpServerDef } from './scan/classify.ts';
 export type {
   ActionSpec,
   AuthorityLevel,
