@@ -1,0 +1,38 @@
+{
+  "name": "vigil-oversight",
+  "version": "0.1.0",
+  "description": "AI 决策账本与熔断内核：让每一个 agent 的决定可拦截、可追溯、可校准",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "vigil": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "demo": "node examples/demo.ts",
+    "dev": "node src/cli.ts",
+    "mcp": "node src/cli.ts mcp",
+    "test": "node --test tests/*.test.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
