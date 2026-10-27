@@ -1,9 +1,70 @@
 {
   "_comment": "把下面这段合并进 ~/.claude/settings.json 或项目的 .claude/settings.json。command 里的路径改成你本机的绝对路径。",
+  "_design": "PreToolUse 负责拦（唯一能阻止动作的时机）。PostToolUse 与 PostToolUseFailure 负责记（凭据顺着响应流出去，只有事后才看得见）。SessionStart 负责把本次会话的监督状态告诉 agent。Stop 与 SessionEnd 负责给成本与轨迹封口。",
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/vigil/src/cli.ts hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/vigil/src/cli.ts hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/vigil/src/cli.ts hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/vigil/src/cli.ts hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/vigil/src/cli.ts hook claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",

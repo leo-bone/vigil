@@ -13,6 +13,7 @@ import { describeAuthority, requiredAuthority } from './policy/authority.ts';
 import { defaultPolicy, grantedAuthority, runRules } from './policy/rules.ts';
 import type { PolicyContext, Rule } from './policy/rules.ts';
 import { hashObject, shortId } from './util/canonical.ts';
+import { KILL_FILE, readKillState } from './policy/killswitch.ts';
 
 export interface KernelOptions {
   ledger: LedgerBackend;
@@ -25,6 +26,8 @@ export interface KernelOptions {
   shapeThresholds?: Record<string, number>;
   /** 判断器故障时是否放行。默认 false —— fail-closed 是底线。 */
   failOpen?: boolean;
+  /** 紧急制动标记文件路径。存在即所有动作转人工，直到手动解除。 */
+  killSwitchPath?: string;
 }
 
 interface GateResult {
@@ -52,6 +55,7 @@ export class Kernel {
   #confidenceFloor: number;
   #shapeThresholds: Record<string, number>;
   #failOpen: boolean;
+  #killSwitchPath: string;
 
   constructor(options: KernelOptions) {
     this.#ledger = options.ledger;
@@ -61,6 +65,12 @@ export class Kernel {
     this.#confidenceFloor = options.confidenceFloor ?? 0.7;
     this.#shapeThresholds = options.shapeThresholds ?? {};
     this.#failOpen = options.failOpen ?? false;
+    this.#killSwitchPath = options.killSwitchPath ?? KILL_FILE;
+  }
+
+  /** 紧急制动是否已启用 */
+  get killed(): boolean {
+    return readKillState(this.#killSwitchPath).active;
   }
 
   get ledger(): LedgerBackend {
@@ -101,6 +111,8 @@ export class Kernel {
 
     const denial = hardBlocks.find((b) => b.severity === 'deny');
     const escalations = hardBlocks.filter((b) => b.severity === 'escalate');
+    // 告警级规则不改变放行判定，但要留痕
+    const warnings = hardBlocks.filter((b) => b.severity === 'warn');
 
     if (denial) {
       outcome = 'deny';
@@ -133,6 +145,17 @@ export class Kernel {
       reasons.push(`通过 ${hardBlocks.length === 0 ? '确定性规则' : '剩余规则'}，授权 ${describeAuthority(granted)} 足够`);
     }
 
+    // 紧急制动：总闸拉下后，所有动作一律转人工，直到手动解除。
+    // 不做成"直接拒绝"——拒绝了连"停下来看看发生了什么"都做不到。
+    const kill = readKillState(this.#killSwitchPath);
+    if (kill.active) {
+      if (outcome !== 'deny') outcome = 'require_human';
+      reasons.push(
+        `紧急制动已启用${kill.since ? `（自 ${kill.since}）` : ''}${kill.reason ? `：${kill.reason}` : ''}，` +
+          `所有动作转人工。解除用 vigil unkill`,
+      );
+    }
+
     const decisionId = shortId('dec');
     const record = this.#ledger.append({
       decisionId,
@@ -162,6 +185,59 @@ export class Kernel {
       reason: reasons.join('；'),
       recordHash: record.hash,
       seq: record.seq,
+      ...(warnings.length > 0 ? { warnings: warnings.map((block) => block.detail) } : {}),
+    };
+  }
+
+  /**
+   * 记一笔"已经发生的事"。
+   *
+   * 有些风险是事后才看得见的：agent 读了一个 .env、调了一个返回 token 的接口，
+   * 凭据是顺着响应流出来的 —— 事前拦不住，事后必须留痕。
+   *
+   * 所以观察事件不走模型、不比对授权，只跑告警级规则：
+   * 命中就把这笔记录标成 require_human，它会自动出现在 approvals 清单里等人处理。
+   */
+  async observe(req: DecisionRequest): Promise<Verdict> {
+    const ctx: PolicyContext = {
+      ...this.#policy,
+      sessionSpendUsd: this.#ledger.sessionSpend(req.sessionId),
+    };
+
+    const blocks = runRules(req, ctx, this.#rules.length > 0 ? this.#rules : undefined).filter(
+      (block) => block.severity === 'warn',
+    );
+
+    const decisionId = shortId('obs');
+    const outcome: Outcome = blocks.length > 0 ? 'require_human' : 'allow';
+    const record = this.#ledger.append({
+      decisionId,
+      ts: new Date().toISOString(),
+      sessionId: req.sessionId,
+      actor: req.actor,
+      intent: req.intent,
+      action: req.action,
+      required: 0,
+      granted: 0,
+      hardBlocks: blocks,
+      judgments: [],
+      outcome,
+      evidenceIds: (req.evidence ?? []).map((e) => e.id),
+      evidenceHash: hashObject(req.evidence ?? []),
+      costUsd: 0,
+    });
+
+    return {
+      decisionId,
+      outcome,
+      required: 0,
+      granted: 0,
+      hardBlocks: blocks,
+      judgments: [],
+      reason: blocks.length > 0 ? blocks.map((block) => block.detail).join('；') : '已记录，无异常',
+      recordHash: record.hash,
+      seq: record.seq,
+      ...(blocks.length > 0 ? { warnings: blocks.map((block) => block.detail) } : {}),
     };
   }
 

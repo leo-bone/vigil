@@ -23,6 +23,7 @@ import { Orchestrator, createPipelineKernel } from './pipeline/orchestrator.ts';
 import { arbitrate } from './pipeline/arbiter.ts';
 import type { Position } from './pipeline/arbiter.ts';
 import { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
+import { KILL_FILE, engageKill, readKillState, releaseKill } from './policy/killswitch.ts';
 import {
   PACKS_DIR,
   installPack,
@@ -50,6 +51,7 @@ const LEDGER_PATH = process.env.VIGIL_LEDGER ?? '.vigil/ledger.ndjson';
 const KEY_PATH = process.env.VIGIL_SIGNING_KEY ?? '.vigil/signing-key.json';
 const THRESHOLDS_PATH = process.env.VIGIL_THRESHOLDS ?? '.vigil/thresholds.json';
 const CONFIG_PATH = process.env.VIGIL_CONFIG ?? CONFIG_BASENAME;
+const KILL_PATH = process.env.VIGIL_KILL_SWITCH ?? KILL_FILE;
 
 /** 有密钥文件就签名，没有就明链。密钥的出现永远是显式动作（vigil keygen）。 */
 function buildSigner(): LedgerSigner | null {
@@ -142,6 +144,7 @@ function buildKernel(policy?: PolicyContext, extraRules: Rule[] = []): Kernel {
     policy,
     rules: extraRules.length > 0 ? [...defaultRules, ...extraRules] : [],
     shapeThresholds: loadShapeThresholds(),
+    killSwitchPath: KILL_PATH,
   });
 }
 
@@ -208,6 +211,9 @@ function usage(): void {
   process.stdout.write(`vigil — AI 决策账本与熔断内核
 
 用法：
+  vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转人工
+  vigil unkill                       解除紧急制动
+  vigil status                       当前账本与制动状态一览
   vigil rules list|show|check|install   规则包：查看、校验、安装
   vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
@@ -526,6 +532,42 @@ async function main(): Promise<void> {
       return;
     }
 
+    case 'kill': {
+      const reasonArg = rest.indexOf('--reason');
+      const reason = reasonArg >= 0 ? (rest[reasonArg + 1] ?? '') : '';
+      const state = engageKill(reason, KILL_PATH);
+      process.stdout.write('🔴 紧急制动已启用。\n');
+      process.stdout.write(`   启用时间：${state.since}\n`);
+      if (state.reason) process.stdout.write(`   原因：${state.reason}\n`);
+      process.stdout.write('   此后所有动作一律转人工，直到执行 vigil unkill 解除。\n');
+      return;
+    }
+
+    case 'unkill': {
+      const state = releaseKill(KILL_PATH);
+      process.stdout.write('🟢 紧急制动已解除。\n');
+      if (state.since) process.stdout.write(`   原启用时间：${state.since}\n`);
+      process.stdout.write('   解除记录留在 .vigil/killed.released，事后可查。\n');
+      return;
+    }
+
+    case 'status': {
+      const kill = readKillState(KILL_PATH);
+      const ledger = buildLedger({ publicKeyOnly: true });
+      const records = ledger.all();
+      const spend = records.reduce((sum, record) => sum + (record.costUsd ?? 0), 0);
+      process.stdout.write(`账本：${LEDGER_PATH}\n`);
+      process.stdout.write(`决策：${records.length} 条，花费 ${spend.toFixed(4)} 美元\n`);
+      process.stdout.write(
+        kill.active
+          ? `🔴 紧急制动已启用${kill.since ? `（自 ${kill.since}）` : ''}${kill.reason ? `：${kill.reason}` : ''}\n`
+          : '🟢 紧急制动未启用\n',
+      );
+      const pending = ledger.pendingApprovals().length;
+      process.stdout.write(`待人工处理：${pending} 条\n`);
+      return;
+    }
+
     case 'rules': {
       const sub = rest[0] ?? 'list';
       const dir = process.env.VIGIL_PACKS ?? PACKS_DIR;
@@ -636,6 +678,7 @@ async function main(): Promise<void> {
         policy: currentPolicy(),
         rules: [...defaultRules, ...packRules()],
         shapeThresholds: loadShapeThresholds(),
+        killSwitchPath: KILL_PATH,
       });
       const pipelineKernel = createPipelineKernel(ledger, judge, currentPolicy(), {
         rules: packRules(),

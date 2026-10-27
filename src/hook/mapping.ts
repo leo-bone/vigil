@@ -8,6 +8,10 @@ export interface HookPayload {
   hook_event_name?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  /** 工具执行结果。PostToolUse 才有 —— 凭据往往是从这里流出去的 */
+  tool_response?: unknown;
+  /** 失败原因。PostToolUseFailure 才有 */
+  error?: unknown;
 }
 
 export interface Classification {

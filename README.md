@@ -121,7 +121,7 @@ node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
 node examples/resumable.ts   # 可续跑统筹循环：外部 agent 扮演工人，跨调用跑完
 node examples/arbiter.ts     # 冲突仲裁：四个案例走完仲裁阶梯的每一级
-npm test                     # 82 个测试
+npm test                     # 100 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -199,6 +199,26 @@ vigil rules install healthcare.patient-data   # 安装，下次启动生效
 
 提示词里写"发邮件前请确认"，模型抽风时就失效了。所以判断点必须放在**执行边界**上：
 
+Vigil 接住 6 类生命周期点，不只是动手前：
+
+| 事件 | 做什么 |
+|---|---|
+| `PreToolUse` | 裁决 —— 唯一能真正阻止动作的时机 |
+| `PostToolUse` | 记录执行结果；**扫描工具输出里的凭据**（凭据顺着响应流出去，只有事后看得见） |
+| `PostToolUseFailure` | 失败也落账 |
+| `SessionStart` | 落账，并把本次会话的监督状态注入 agent 上下文 |
+| `Stop` / `SessionEnd` / `PreCompact` | 给会话封口：累计决策数与花费 |
+
+**紧急制动** —— 一条命令，让后面所有动作立刻全部转人工，直到你手动解除：
+
+```bash
+vigil kill --reason "agent 在批量改生产配置"   # 拉闸
+vigil unkill                                    # 解闸
+```
+
+不做成"直接拒绝"，是因为拒绝了连"停下来看看发生了什么"都做不到。
+解除动作本身留痕（`.vigil/killed.released`），事后能查是谁解的。
+
 ```json
 {
   "hooks": {
@@ -236,6 +256,9 @@ vigil run -- npm test          # 退出码 0，正常执行
 ### CLI
 
 ```bash
+vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转人工
+vigil unkill                       解除紧急制动
+vigil status                       当前账本与制动状态一览
 vigil rules list|show|check|install   规则包：查看、校验、安装
 vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
 vigil scan [目录] --write      # 扫描 agent 能力并生成治理配置（--write 立即生效）
@@ -451,6 +474,7 @@ SQLite 后端用 WAL 模式 + `BEGIN IMMEDIATE`：写锁排队而不是报错，
 - [x] 规则包（声明式 JSON，4 个内置行业包，可安装可校验）
 - [x] 存储层换 SQLite（node:sqlite 内置，多进程并发写，哈希链语义不变）
 - [x] GitHub 顶级 AI 项目 Top 50 调研（[报告](docs/ai-landscape-2026-10.md)）＋ MCP 协议合规与工具授权标注
+- [x] 竞品对标 ECC 实跑（[报告](docs/competitor-benchmark.md)）：多事件钩子、输出侧凭据检测、告警级规则、紧急制动
 - [ ] 规则包索引与分发：把格式变成可发现、可签名的包源
 
 ## License

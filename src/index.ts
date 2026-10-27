@@ -92,10 +92,12 @@ export {
 } from './policy/pack.ts';
 export type { RulePack, DeclarativeRule } from './policy/pack.ts';
 export { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
+export { detectSecrets, hasSecret, describeSecrets } from './policy/secrets.ts';
+export type { SecretFinding } from './policy/secrets.ts';
 export { classifyToolCall, buildQuestions, resolveSessionId, analyzeShell } from './hook/mapping.ts';
 export type { Classification, HookPayload, ShellRisk } from './hook/mapping.ts';
-export { runClaudeHook } from './hook/claude.ts';
-export type { ClaudeHookOptions, ClaudeHookOutput } from './hook/claude.ts';
+export { runClaudeHook, handleHookEvent } from './hook/claude.ts';
+export type { ClaudeHookOptions, ClaudeHookOutput, ClaudeHookEvent } from './hook/claude.ts';
 export { runWrapped } from './hook/run.ts';
 export { hookPolicy } from './hook/policy.ts';
 export { loadPolicyConfig, savePolicyConfig, parsePolicyConfig, CONFIG_BASENAME } from './policy/config.ts';

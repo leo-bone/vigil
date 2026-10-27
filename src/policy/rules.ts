@@ -1,5 +1,6 @@
 import type { ActionSpec, AuthorityLevel, DecisionRequest, HardBlock } from '../types.ts';
 import { matchesActor } from '../util/canonical.ts';
+import { describeSecrets, detectSecrets } from './secrets.ts';
 
 /**
  * 策略上下文。
@@ -26,18 +27,9 @@ export interface PolicyContext {
 export interface Rule {
   id: string;
   description: string;
-  severity: 'deny' | 'escalate';
+  severity: 'deny' | 'escalate' | 'warn';
   check: (req: DecisionRequest, ctx: PolicyContext) => HardBlock | null;
 }
-
-/** 密钥泄露的特征。正则能 100% 抓到的东西，不该交给模型去猜。 */
-const SECRET_PATTERNS = [
-  /\bsk-[A-Za-z0-9_-]{16,}/,
-  /\btsf_[A-Za-z0-9_-]{16,}/,
-  /\bghp_[A-Za-z0-9]{20,}/,
-  /\bAKIA[0-9A-Z]{16}\b/,
-  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
-];
 
 export const defaultRules: Rule[] = [
   {
@@ -95,12 +87,29 @@ export const defaultRules: Rule[] = [
       const payload = typeof req.action.payload === 'string'
         ? req.action.payload
         : JSON.stringify(req.action.payload ?? '');
-      for (const pattern of SECRET_PATTERNS) {
-        if (pattern.test(payload)) {
-          return { rule: 'payload.secret', severity: 'deny', detail: '载荷中检测到疑似密钥或私钥，已阻止外发' };
-        }
-      }
-      return null;
+      const findings = detectSecrets(payload);
+      if (findings.length === 0) return null;
+      return {
+        rule: 'payload.secret',
+        severity: 'deny',
+        detail: `载荷中检测到疑似凭据（${describeSecrets(findings)}），已阻止外发`,
+      };
+    },
+  },
+  {
+    id: 'output.secret_exposure',
+    description: '工具输出里出现凭据形态的字符串',
+    severity: 'warn',
+    check: (req) => {
+      const output = req.extras?.toolOutput;
+      if (typeof output !== 'string' || output === '') return null;
+      const findings = detectSecrets(output);
+      if (findings.length === 0) return null;
+      return {
+        rule: 'output.secret_exposure',
+        severity: 'warn',
+        detail: `工具 ${req.action.target ?? '(未知)'} 的输出中出现疑似凭据（${describeSecrets(findings)}）。动作已发生、拦不住，但必须有人处理：确认该凭据是否已经外流，必要时立刻轮换`,
+      };
     },
   },
   {

@@ -94,7 +94,13 @@ export interface Judgment {
 /** 确定性规则命中。这条链路里唯一的"必拦"来源。 */
 export interface HardBlock {
   rule: string;
-  severity: 'deny' | 'escalate';
+  /**
+   * deny   —— 一票否决
+   * escalate —— 转人工
+   * warn   —— 只记录、不阻断。用于"事后才知道"的风险：动作已经发生，
+   *            拦不住，但必须留下痕迹等人处理。
+   */
+  severity: 'deny' | 'escalate' | 'warn';
   detail: string;
 }
 
@@ -123,6 +129,8 @@ export interface DecisionRequest {
 export interface Verdict {
   decisionId: string;
   outcome: Outcome;
+  /** 告警级规则的命中说明。不影响放行判定，但会被记录并出现在审批清单里。 */
+  warnings?: string[];
   /** 动作本身要求的授权等级 */
   required: AuthorityLevel;
   /** 该 actor 实际被授予的等级 */
