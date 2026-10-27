@@ -1,6 +1,6 @@
 import type { Kernel, KernelOptions } from '../kernel.ts';
 import { Kernel as KernelClass } from '../kernel.ts';
-import { Ledger } from '../ledger/store.ts';
+import type { LedgerBackend } from '../ledger/backend.ts';
 import { defaultPolicy, defaultRules } from '../policy/rules.ts';
 import type { PolicyContext } from '../policy/rules.ts';
 import type { Judge } from '../judge/index.ts';
@@ -450,7 +450,7 @@ export class Orchestrator {
  * 岔路动作本身都是可逆的内部判断，真正危险的对外动作仍由 hook 层把守。
  */
 export function createPipelineKernel(
-  ledger: Ledger,
+  ledger: LedgerBackend,
   judge: Judge,
   policyOverrides: Partial<PolicyContext> = {},
   options: Partial<KernelOptions> = {},

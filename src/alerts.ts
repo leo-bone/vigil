@@ -1,5 +1,5 @@
 import type { DecisionRecord } from './types.ts';
-import { Ledger } from './ledger/store.ts';
+import type { LedgerBackend } from './ledger/backend.ts';
 
 export type Severity = 'info' | 'warn' | 'critical';
 
@@ -31,7 +31,7 @@ const DEFAULT_WINDOW = 30 * 60 * 1000;
  * 只保留四种真正需要人立刻看的信号。预警系统最大的敌人是噪音，
  * 而不是漏报 —— 一个没人看的告警等于没有告警。
  */
-export function scanAlerts(ledger: Ledger, options: AlertOptions = {}): Alert[] {
+export function scanAlerts(ledger: LedgerBackend, options: AlertOptions = {}): Alert[] {
   const windowMs = options.windowMs ?? DEFAULT_WINDOW;
   const now = options.now ?? Date.now();
   const recent = ledger.since(now - windowMs);

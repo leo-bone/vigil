@@ -1,6 +1,6 @@
 import type { DecisionRecord } from '../types.ts';
 import { actionSummary } from '../policy/rules.ts';
-import { Ledger } from '../ledger/store.ts';
+import type { LedgerBackend } from '../ledger/backend.ts';
 
 export interface TimelineEntry {
   seq: number;
@@ -55,7 +55,7 @@ function summarizeReason(record: DecisionRecord): string {
  * 目标不是"回放日志"，而是回答四个问题：
  * 哪一步开始走偏、当时缺了什么证据、哪些决定被证明是错的、以后该改哪条规则。
  */
-export function postmortem(ledger: Ledger, sessionId: string): Postmortem {
+export function postmortem(ledger: LedgerBackend, sessionId: string): Postmortem {
   const records = ledger.bySession(sessionId);
   const chain = ledger.verify();
 

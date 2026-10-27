@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { Ledger } from './ledger/store.ts';
+import { SqliteLedger, importNdjson } from './ledger/sqlite.ts';
+import type { LedgerBackend } from './ledger/backend.ts';
 import { Kernel } from './kernel.ts';
 import { JevJudge } from './judge/jev.ts';
 import { LocalJudge } from './judge/local.ts';
@@ -65,8 +67,21 @@ function loadShapeThresholds(): Record<string, number> | undefined {
   }
 }
 
-function buildLedger(options: { signer?: boolean; publicKeyOnly?: boolean } = {}): Ledger {
+/**
+ * 账本路径决定后端：`.db` / `.sqlite` 用 SQLite（支持多进程并发），
+ * 其他一律用 NDJSON（零依赖、单进程、人可读）。
+ *
+ * 两种后端的哈希链语义完全一致，换后端不会让已有的验证包失效。
+ */
+function buildLedger(options: { signer?: boolean; publicKeyOnly?: boolean } = {}): LedgerBackend {
   const identity = loadSigningIdentity(KEY_PATH);
+  if (/\.(db|sqlite3?)$/i.test(LEDGER_PATH)) {
+    if (options.publicKeyOnly && identity) {
+      return new SqliteLedger(LEDGER_PATH, { publicKeyPem: identity.publicKeyPem });
+    }
+    const signer = options.signer === false ? undefined : buildSigner();
+    return new SqliteLedger(LEDGER_PATH, signer ? { signer } : {});
+  }
   if (options.publicKeyOnly && identity) {
     return new Ledger(LEDGER_PATH, { publicKeyPem: identity.publicKeyPem });
   }
@@ -194,6 +209,7 @@ function usage(): void {
 
 用法：
   vigil rules list|show|check|install   规则包：查看、校验、安装
+  vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
   vigil arbitrate <文件.json|->    多 agent 结论冲突时定夺
   vigil decide <文件.json|->     请求裁决，结果写入账本
@@ -585,6 +601,28 @@ async function main(): Promise<void> {
       }
 
       throw new Error(`未知的子命令：${sub}。可用：list / show / check / install`);
+    }
+
+    case 'ledger-migrate': {
+      const from = rest[0];
+      const to = rest[1];
+      if (!from || !to) throw new Error('用法：vigil ledger-migrate <源.ndjson> <目标.db>');
+      const result = importNdjson(from, to);
+      process.stdout.write(
+        `已导入 ${result.imported} 条决策到 ${to}${result.skipped ? `，跳过 ${result.skipped} 条（重复或无效）` : ''}\n`,
+      );
+      const ledger = new SqliteLedger(to, {
+        publicKeyPem: loadSigningIdentity(KEY_PATH)?.publicKeyPem,
+      });
+      const check = ledger.verify();
+      ledger.close();
+      process.stdout.write(
+        check.ok
+          ? `哈希链校验通过，共 ${check.count} 条${check.signaturesVerified ? `，验签 ${check.signaturesVerified} 条` : ''}\n`
+          : `⚠ 哈希链校验失败：${check.reason}\n`,
+      );
+      process.stdout.write(`\n之后用 VIGIL_LEDGER=${to} 即可切到新账本。\n`);
+      return;
     }
 
     case 'mcp': {

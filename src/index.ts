@@ -1,6 +1,9 @@
 export { Kernel } from './kernel.ts';
 export type { KernelOptions } from './kernel.ts';
 export { Ledger, GENESIS_HASH } from './ledger/store.ts';
+export { SqliteLedger, importNdjson } from './ledger/sqlite.ts';
+export type { SqliteLedgerOptions } from './ledger/sqlite.ts';
+export type { LedgerBackend } from './ledger/backend.ts';
 export type { LedgerSigner, NewApproval, ApprovalEvent } from './ledger/store.ts';
 export {
   generateSigningIdentity,

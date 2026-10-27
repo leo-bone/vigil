@@ -1,4 +1,4 @@
-import type { Ledger } from './ledger/store.ts';
+import type { LedgerBackend } from './ledger/backend.ts';
 import type { DecisionRecord } from './types.ts';
 
 /**
@@ -20,7 +20,7 @@ export interface VigilBundle {
   records: DecisionRecord[];
 }
 
-export function exportBundle(ledger: Ledger, publicKeyPem?: string): VigilBundle {
+export function exportBundle(ledger: LedgerBackend, publicKeyPem?: string): VigilBundle {
   const records = ledger.all();
   const chain = ledger.verify();
   if (!chain.ok) {

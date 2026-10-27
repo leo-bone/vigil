@@ -121,7 +121,7 @@ node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
 node examples/resumable.ts   # 可续跑统筹循环：外部 agent 扮演工人，跨调用跑完
 node examples/arbiter.ts     # 冲突仲裁：四个案例走完仲裁阶梯的每一级
-npm test                     # 76 个测试
+npm test                     # 82 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -237,6 +237,7 @@ vigil run -- npm test          # 退出码 0，正常执行
 
 ```bash
 vigil rules list|show|check|install   规则包：查看、校验、安装
+vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
 vigil scan [目录] --write      # 扫描 agent 能力并生成治理配置（--write 立即生效）
 vigil arbitrate <文件.json|->  多 agent 结论冲突时定夺
 vigil decide request.json     # 或从 stdin 读：vigil decide -
@@ -390,15 +391,39 @@ const report = await company.runTask('sess_1', 'task_1', '写一份行业调研'
 | OPA / Rego | 策略引擎 | 我们故意不用 Rego：0.1 阶段 YAML 化的谓词函数更快出活，等规则过百条再换 |
 | Guardrails AI | 输出校验 | 管的是模型输出，Vigil 管的是动作 |
 
+## 存储层
+
+两种后端，**哈希链语义完全一致** —— 哈希只覆盖记录内容，与存储方式无关，
+所以换后端不会让已有的验证包失效。
+
+| 后端 | 什么时候用 | 特点 |
+|---|---|---|
+| **NDJSON**（默认） | 单进程、个人使用 | 零依赖、人可读、可以直接 `grep` |
+| **SQLite** | 多个进程 / 多个 agent 同时写 | Node 22 内置 `node:sqlite`，同样零依赖 |
+
+选哪个由路径决定：`.db` / `.sqlite` 结尾就用 SQLite。
+
+```bash
+export VIGIL_LEDGER=.vigil/ledger.db     # 切到 SQLite
+vigil ledger-migrate .vigil/ledger.ndjson .vigil/ledger.db   # 迁移现有账本
+```
+
+SQLite 后端用 WAL 模式 + `BEGIN IMMEDIATE`：写锁排队而不是报错，
+"读上一条 → 算哈希 → 写入"是一个原子操作，所以多个进程同时写也不会算错 `prevHash`。
+
+实测：三个进程各写 40 条，共 120 条，哈希链完整，序号连续。
+
 ## 已知局限
 
 诚实列出来，免得你踩：
 
-1. **单进程写入**。账本是 NDJSON + 内存索引，并发写会出问题。要上多人用就得换 SQLite/libsql —— 哈希链语义不变，这是刻意留的替换点。
-2. **规则库很薄**。默认规则只覆盖了最常见的事故形态。真正的护城河是规则库随事故积累变厚，不是代码。
-3. **校准需要标签**。没有事后回填，`calibrate` 和 `thresholds` 就是个空壳。这是运营问题，不是技术问题。
-4. **判定不了"意图是否真诚"**。agent 说它要发邮件，实际可能干别的。Vigil 看的是动作形状，不是自述。要防这个得在工具边界强制执行，不在这一层。
-5. **阈值的"按题型建议"只覆盖放行方向**。风险型问题（escalateWhenTrue）的自动标定还没做，因为放行/拦截语义相反，需要更大样本才可靠。
+1. **SQLite 后端还是实验特性**。Node 22 的 `node:sqlite` 尚未转正，接口可能变。
+   我们屏蔽了它的警告提示（`VIGIL_SHOW_SQLITE_WARNING=1` 可以放出来），但这不改变它随时可能变的性质。
+2. **NDJSON 后端不支持并发写**。要用多个进程同时写，请切到 SQLite。
+3. **规则库很薄**。默认规则只覆盖了最常见的事故形态。真正的护城河是规则库随事故积累变厚，不是代码。
+4. **校准需要标签**。没有事后回填，`calibrate` 和 `thresholds` 就是个空壳。这是运营问题，不是技术问题。
+5. **判定不了"意图是否真诚"**。agent 说它要发邮件，实际可能干别的。Vigil 看的是动作形状，不是自述。要防这个得在工具边界强制执行，不在这一层。
+6. **阈值的"按题型建议"只覆盖放行方向**。风险型问题（escalateWhenTrue）的自动标定还没做，因为放行/拦截语义相反，需要更大样本才可靠。
 
 ## 合规对照
 
@@ -421,7 +446,8 @@ const report = await company.runTask('sess_1', 'task_1', '写一份行业调研'
 - [x] 统筹循环接入 MCP（可续跑状态机，外部 agent 扮演工人）
 - [x] 冲突仲裁 `Arbiter`：证据与权级定夺，未被驳倒的否决立场绝不放行
 - [x] 规则包（声明式 JSON，4 个内置行业包，可安装可校验）
-- [ ] 存储层换 libsql，支持并发
+- [x] 存储层换 SQLite（node:sqlite 内置，多进程并发写，哈希链语义不变）
+- [ ] 规则包索引与分发：把格式变成可发现、可签名的包源
 
 ## License
 

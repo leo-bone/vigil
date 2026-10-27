@@ -7,7 +7,7 @@ import type {
   Outcome,
   Verdict,
 } from './types.ts';
-import { Ledger } from './ledger/store.ts';
+import type { LedgerBackend } from './ledger/backend.ts';
 import type { Judge } from './judge/index.ts';
 import { describeAuthority, requiredAuthority } from './policy/authority.ts';
 import { defaultPolicy, grantedAuthority, runRules } from './policy/rules.ts';
@@ -15,7 +15,7 @@ import type { PolicyContext, Rule } from './policy/rules.ts';
 import { hashObject, shortId } from './util/canonical.ts';
 
 export interface KernelOptions {
-  ledger: Ledger;
+  ledger: LedgerBackend;
   judge: Judge;
   policy?: PolicyContext;
   rules?: Rule[];
@@ -45,7 +45,7 @@ interface GateResult {
  * 它只能让一个本来会放行的动作变成需要人看。否决只来自确定性规则。
  */
 export class Kernel {
-  #ledger: Ledger;
+  #ledger: LedgerBackend;
   #judge: Judge;
   #policy: PolicyContext;
   #rules: Rule[];
@@ -63,7 +63,7 @@ export class Kernel {
     this.#failOpen = options.failOpen ?? false;
   }
 
-  get ledger(): Ledger {
+  get ledger(): LedgerBackend {
     return this.#ledger;
   }
 

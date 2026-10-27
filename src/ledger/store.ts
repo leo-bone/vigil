@@ -2,9 +2,32 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname } from 'node:path';
 import { hashObject } from '../util/canonical.ts';
 import type { ApprovalInfo, DecisionRecord, OutcomeLabel } from '../types.ts';
+import type { LedgerBackend } from './backend.ts';
 import { signBytes, verifyBytes } from './signing.ts';
 
 export const GENESIS_HASH = '0'.repeat(64);
+
+/**
+ * 剔除由账本自己算出来的字段。
+ *
+ * 调用方（尤其是 JS 调用方）可能顺手传了 seq / prevHash / hash。
+ * 这些字段一律由账本计算 —— 带着它们算哈希，会算出永远无法验证的记录，
+ * 而这种损坏要等到事后 verify 才会暴露，那时已经晚了。
+ */
+export function stripDerived(input: NewRecord): NewRecord {
+  const {
+    seq: _seq,
+    prevHash: _prevHash,
+    hash: _hash,
+    label: _label,
+    labelNote: _labelNote,
+    labelTs: _labelTs,
+    sig: _sig,
+    approval: _approval,
+    ...rest
+  } = input as DecisionRecord;
+  return rest;
+}
 
 /** 签名能力。signer 由调用方注入；账本自己不持有私钥。 */
 export interface LedgerSigner {
@@ -55,10 +78,10 @@ type LedgerEvent = DecisionEvent | LabelEvent | ApprovalEvent;
  * 2. 哈希链。每条记录包含上一条的哈希，改任何一条都会断链。
  * 3. 可回放。给定 sessionId 就能重放当时的判断过程。
  *
- * 单进程写入，够用于个人和小团队。要并发就得换存储层，
- * 但哈希链的语义不会变 —— 这是刻意留的替换点。
+ * 单进程写入，够用于个人和小团队。要并发就用 SqliteLedger ——
+ * 但哈希链的语义不会变，这是刻意留的替换点。
  */
-export class Ledger {
+export class Ledger implements LedgerBackend {
   #path: string;
   #decisions: DecisionRecord[] = [];
   #labels = new Map<string, LabelEvent>();
@@ -137,13 +160,16 @@ export class Ledger {
     appendFileSync(this.#path, JSON.stringify(event) + '\n', 'utf8');
   }
 
-  /** 追加一条决定。seq / prevHash / hash / sig 由账本自己算，调用方无法伪造。 */
-  append(input: NewRecord): DecisionRecord {
+  /**
+   * 追加一条决定。seq / prevHash / hash / sig 由账本自己算，调用方无法伪造。
+   *
+   * options.sig 只给迁移用：哈希不覆盖签名，所以事后附加原签名是安全的。
+   */
+  append(input: NewRecord, options: { sig?: string } = {}): DecisionRecord {
     const seq = this.#seq + 1;
-    const body = { ...input, seq, prevHash: this.#lastHash };
+    const body = { ...stripDerived(input), seq, prevHash: this.#lastHash };
     const hash = hashObject(body);
-    // 签名对"记录哈希"生效：改任何字段都会同时破坏哈希链和签名
-    const sig = this.#signer ? this.#signer.sign(hash) : undefined;
+    const sig = options.sig ?? (this.#signer ? this.#signer.sign(hash) : undefined);
     const record: DecisionRecord = { ...body, hash, sig, label: 'unknown' };
     this.#decisions.push(record);
     this.#seq = seq;
