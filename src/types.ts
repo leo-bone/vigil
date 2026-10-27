@@ -83,6 +83,8 @@ export interface Judgment {
   probabilities?: Record<string, number>;
   /** 模型自报的置信度 */
   confidence: number;
+  /** 门槛方向：above = 达到 floor 才放行；below = 低于 floor 才放行（风险题）。由内核盖戳。 */
+  direction?: 'above' | 'below';
   /** false 表示返回格式不可用，按 fail-closed 处理 */
   valid: boolean;
   error?: string;
@@ -154,8 +156,22 @@ export interface DecisionRecord {
   costUsd: number;
   prevHash: string;
   hash: string;
+  /** Ed25519 签名（对 hash 签名）。配置了签名密钥时存在。哈希链只防改一条，签名才防整条重算。 */
+  sig?: string;
   /** 事后回填的标签，默认为 unknown */
   label: OutcomeLabel;
   labelNote?: string;
   labelTs?: string;
+  /** 人工审批结论。boundHash 绑定审批者当时看到的记录，记录变过就对不上。 */
+  approval?: ApprovalInfo;
+}
+
+export interface ApprovalInfo {
+  decision: 'approved' | 'rejected';
+  approver: string;
+  /** 审批所绑定的记录哈希 —— 审批者所见即所批 */
+  boundHash: string;
+  note?: string;
+  ts: string;
+  sig?: string;
 }

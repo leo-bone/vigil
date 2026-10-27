@@ -4,7 +4,7 @@ import { Ledger } from '../ledger/store.ts';
 import { defaultPolicy, defaultRules } from '../policy/rules.ts';
 import type { PolicyContext } from '../policy/rules.ts';
 import type { Judge } from '../judge/index.ts';
-import type { Evidence } from '../types.ts';
+import type { Evidence, Verdict } from '../types.ts';
 import { pipelineRules } from './rules.ts';
 import {
   forkAcceptance,
@@ -65,6 +65,15 @@ export interface VigilWorker {
   run(ctx: WorkerRunContext): Promise<WorkerOutput>;
 }
 
+export interface EscalationInfo {
+  sessionId: string;
+  taskId: string;
+  reason: string;
+  tier: RiskTier;
+  /** 升级记录的裁决，审批事件将绑定到这条记录 */
+  verdict: Verdict;
+}
+
 export interface OrchestratorOptions {
   /** 单个任务最多尝试次数，默认 3 */
   maxAttempts?: number;
@@ -72,6 +81,16 @@ export interface OrchestratorOptions {
   failureThreshold?: number;
   /** 防御性步数上限，防止编排逻辑自身死循环，默认 24 */
   maxSteps?: number;
+  /**
+   * 升级回调（吸收 OMA 的"可恢复审批"）。
+   *
+   * 不提供：升级即终止任务（原行为）。
+   * 提供：宿主决定 'retry'（人工批准继续，审批落账并绑定升级记录的哈希）
+   * 或 'abort'（照旧终止）。同一任务最多接受 2 次人工续命，防止无限人肉循环。
+   */
+  onEscalation?: (info: EscalationInfo) => Promise<'retry' | 'abort'> | 'retry' | 'abort';
+  /** 人工续命次数上限，默认 2 */
+  maxEscalations?: number;
 }
 
 export type TaskStatus = 'completed' | 'stopped' | 'escalated';
@@ -96,12 +115,16 @@ export class Orchestrator {
   #maxAttempts: number;
   #failureThreshold: number;
   #maxSteps: number;
+  #onEscalation?: NonNullable<OrchestratorOptions['onEscalation']>;
+  #maxEscalations: number;
 
   constructor(kernel: Kernel, options: OrchestratorOptions = {}) {
     this.#kernel = kernel;
     this.#maxAttempts = options.maxAttempts ?? 3;
     this.#failureThreshold = options.failureThreshold ?? 2;
     this.#maxSteps = options.maxSteps ?? 24;
+    this.#onEscalation = options.onEscalation;
+    this.#maxEscalations = options.maxEscalations ?? 2;
   }
 
   get kernel(): Kernel {
@@ -152,7 +175,13 @@ export class Orchestrator {
           stateSummary: feedback,
         });
         steps.push(`升级：${escalation.tier}`);
-        return this.#report(sessionId, taskId, task, 'escalated', attempts, steps, trace, route.reason, escalation.tier);
+        // 人工续命：宿主回调决定，批准则落账后继续，拒绝或超限则终止
+        const handled = await this.#handleEscalation(sessionId, taskId, route.reason, escalation.tier, escalation.verdict, steps);
+        if (!handled) {
+          return this.#report(sessionId, taskId, task, 'escalated', attempts, steps, trace, route.reason, escalation.tier);
+        }
+        feedback = `人工批准继续（${route.reason}），已重新路由`;
+        continue;
       }
       const worker = workers.find((w) => w.id === route.workerId)!;
       attempts += 1;
@@ -208,6 +237,36 @@ export class Orchestrator {
 
     reason = `编排步数超过防御上限 ${this.#maxSteps}，强制止损`;
     return this.#report(sessionId, taskId, task, 'stopped', attempts, steps, trace, reason);
+  }
+
+  /** 升级处理：无回调或回调说 abort → false（终止）；批准 → true（续命次数 +1，超限终止） */
+  async #handleEscalation(
+    sessionId: string,
+    taskId: string,
+    reason: string,
+    tier: RiskTier,
+    verdict: Verdict,
+    steps: string[],
+  ): Promise<boolean> {
+    if (!this.#onEscalation) return false;
+    const used = this.#kernel.ledger
+      .bySession(sessionId)
+      .filter((r) => r.approval?.decision === 'approved').length;
+    if (used >= this.#maxEscalations) {
+      steps.push(`人工续命已达上限 ${this.#maxEscalations} 次，终止`);
+      return false;
+    }
+    const answer = await this.#onEscalation({ sessionId, taskId, reason, tier, verdict });
+    if (answer !== 'retry') return false;
+    // 审批落账并绑定升级记录哈希：事后能对上"人到底批的是哪条"
+    this.#kernel.ledger.approve({
+      decisionId: verdict.decisionId,
+      decision: 'approved',
+      approver: 'orchestrator/onEscalation',
+      note: reason,
+    });
+    steps.push(`人工批准继续（第 ${used + 1} 次续命）`);
+    return true;
   }
 
   #report(

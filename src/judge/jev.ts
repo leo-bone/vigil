@@ -2,7 +2,8 @@ import type { Judge } from './index.ts';
 import type { JudgeQuestion, Judgment, QuestionType } from '../types.ts';
 
 export interface JevOptions {
-  apiKey: string;
+  /** 本地决策服务（strands-decider / laya）不需要鉴权，可省略 */
+  apiKey?: string;
   model?: string;
   baseUrl?: string;
   timeoutMs?: number;
@@ -14,6 +15,8 @@ interface RawAnswer {
   choice?: string;
   score?: number;
   probability?: number;
+  /** strands-decider 的 boolean 答案放在 noul 字段（0..1，越高越是） */
+  noul?: number;
   probabilities?: Record<string, number>;
   confidence?: number;
 }
@@ -26,6 +29,7 @@ function toWireType(type: QuestionType): string {
 
 function pickProbability(answer: RawAnswer): number | undefined {
   if (typeof answer.probability === 'number') return answer.probability;
+  if (typeof answer.noul === 'number') return answer.noul;
   const table = answer.probabilities;
   if (!table) return undefined;
   if (typeof table.true === 'number') return table.true;
@@ -45,7 +49,7 @@ function pickConfidence(answer: RawAnswer): number {
 }
 
 /**
- * TypeSafe Jev 适配层。
+ * TypeSafe Jev 适配层（也兼容所有说 /v1/systemone 方言的服务端）。
  *
  * 三条纪律：
  * 1. 只发送类型化问题，从不索取自由文本 —— 模型在结构上就无法越权。
@@ -53,8 +57,8 @@ function pickConfidence(answer: RawAnswer): number {
  * 3. 只对 408/409/429/5xx 重试，避免不确定的重复计费。
  */
 export class JevJudge implements Judge {
-  readonly name = 'jev';
-  #apiKey: string;
+  readonly name: string = 'jev';
+  #apiKey?: string;
   #model: string;
   #baseUrl: string;
   #timeoutMs: number;
@@ -125,12 +129,11 @@ export class JevJudge implements Judge {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
       try {
+        const headers: Record<string, string> = { 'content-type': 'application/json' };
+        if (this.#apiKey) headers.authorization = `Bearer ${this.#apiKey}`;
         const response = await fetch(this.#baseUrl, {
           method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${this.#apiKey}`,
-          },
+          headers,
           body: JSON.stringify(body),
           signal: controller.signal,
         });

@@ -21,6 +21,8 @@ export interface KernelOptions {
   rules?: Rule[];
   /** 全局置信度下限，未在问题上单独声明 floor 时使用 */
   confidenceFloor?: number;
+  /** 按题型形状覆盖阈值，如 { boolean: 0.85, 'choice:4': 0.9 }。优先级：题设 floor > 形状 > 全局。 */
+  shapeThresholds?: Record<string, number>;
   /** 判断器故障时是否放行。默认 false —— fail-closed 是底线。 */
   failOpen?: boolean;
 }
@@ -48,6 +50,7 @@ export class Kernel {
   #policy: PolicyContext;
   #rules: Rule[];
   #confidenceFloor: number;
+  #shapeThresholds: Record<string, number>;
   #failOpen: boolean;
 
   constructor(options: KernelOptions) {
@@ -56,6 +59,7 @@ export class Kernel {
     this.#policy = options.policy ?? defaultPolicy();
     this.#rules = options.rules ?? [];
     this.#confidenceFloor = options.confidenceFloor ?? 0.7;
+    this.#shapeThresholds = options.shapeThresholds ?? {};
     this.#failOpen = options.failOpen ?? false;
   }
 
@@ -79,6 +83,12 @@ export class Kernel {
     const hardBlocks: HardBlock[] = runRules(req, ctx, this.#rules.length > 0 ? this.#rules : undefined);
 
     const { judgments, judgeError } = await this.#runJudge(req);
+    // 给每条判断盖上方向戳：事后阈值校准需要知道这题是"达标放行"还是"超线拦截"
+    const questions = req.questions ?? [];
+    for (const j of judgments) {
+      const q = questions.find((item) => item.name === j.name);
+      if (q) j.direction = q.escalateWhenTrue ? 'below' : 'above';
+    }
     const gate = this.#evaluateGate(req.questions ?? [], judgments);
 
     const reasons: string[] = [];
@@ -172,6 +182,18 @@ export class Kernel {
     }
   }
 
+  /** 阈值解析顺序：题设 floor > 题型形状 > 全局。形状让"按题型标定"成为可能。 */
+  #floorFor(question: JudgeQuestion): number {
+    if (question.floor !== undefined) return question.floor;
+    const shape =
+      question.type === 'boolean'
+        ? 'boolean'
+        : question.type === 'choice'
+          ? `choice:${Object.keys(question.criteria ?? {}).length}`
+          : `score:${question.scale?.length ?? 5}`;
+    return this.#shapeThresholds[shape] ?? this.#shapeThresholds[question.type] ?? this.#confidenceFloor;
+  }
+
   #evaluateGate(questions: JudgeQuestion[], judgments: Judgment[]): GateResult {
     const reasons: string[] = [];
     let escalate = false;
@@ -187,7 +209,7 @@ export class Kernel {
         continue;
       }
 
-      const floor = question.floor ?? this.#confidenceFloor;
+      const floor = this.#floorFor(question);
 
       if (judgment.type === 'boolean') {
         const p = judgment.probability ?? 0.5;

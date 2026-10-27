@@ -1,31 +1,72 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { Ledger } from './ledger/store.ts';
 import { Kernel } from './kernel.ts';
 import { JevJudge } from './judge/jev.ts';
+import { LocalJudge } from './judge/local.ts';
 import { MockJudge } from './judge/mock.ts';
 import { postmortem } from './review/postmortem.ts';
 import { calibrate } from './review/calibrate.ts';
+import { adviseThresholds } from './review/thresholds.ts';
 import { scanAlerts } from './alerts.ts';
 import { startMcpServer } from './mcp/server.ts';
 import { runClaudeHook } from './hook/claude.ts';
 import { runWrapped } from './hook/run.ts';
 import { hookPolicy } from './hook/policy.ts';
+import { exportBundle } from './bundle.ts';
+import { toOtelJsonl } from './otel.ts';
+import {
+  generateSigningIdentity,
+  loadSigningIdentity,
+  saveSigningIdentity,
+  signBytes,
+} from './ledger/signing.ts';
+import type { LedgerSigner } from './ledger/store.ts';
 import type { PolicyContext } from './policy/rules.ts';
 import type { DecisionRequest, OutcomeLabel } from './types.ts';
 
 const LEDGER_PATH = process.env.VIGIL_LEDGER ?? '.vigil/ledger.ndjson';
+const KEY_PATH = process.env.VIGIL_SIGNING_KEY ?? '.vigil/signing-key.json';
+const THRESHOLDS_PATH = process.env.VIGIL_THRESHOLDS ?? '.vigil/thresholds.json';
+
+/** 有密钥文件就签名，没有就明链。密钥的出现永远是显式动作（vigil keygen）。 */
+function buildSigner(): LedgerSigner | null {
+  const identity = loadSigningIdentity(KEY_PATH);
+  if (!identity) return null;
+  return { publicKeyPem: identity.publicKeyPem, sign: (data) => signBytes(identity.privateKeyPem, data) };
+}
+
+function loadShapeThresholds(): Record<string, number> | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(THRESHOLDS_PATH, 'utf8')) as Record<string, number>;
+    return Object.keys(raw).length > 0 ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildLedger(options: { signer?: boolean; publicKeyOnly?: boolean } = {}): Ledger {
+  const identity = loadSigningIdentity(KEY_PATH);
+  if (options.publicKeyOnly && identity) {
+    return new Ledger(LEDGER_PATH, { publicKeyPem: identity.publicKeyPem });
+  }
+  const signer = options.signer === false ? undefined : buildSigner();
+  return new Ledger(LEDGER_PATH, signer ? { signer } : {});
+}
 
 function buildKernel(policy?: PolicyContext): Kernel {
-  const ledger = new Ledger(LEDGER_PATH);
+  const ledger = buildLedger();
+  const localUrl = process.env.VIGIL_LOCAL_JUDGE;
   const apiKey = process.env.TYPESAFE_API_KEY;
-  const judge = apiKey
-    ? new JevJudge({ apiKey, model: process.env.VIGIL_MODEL ?? 'jev-latest' })
-    : new MockJudge();
-  if (!apiKey && process.env.VIGIL_QUIET !== '1') {
-    process.stderr.write('[vigil] 未检测到 TYPESAFE_API_KEY，使用确定性 MockJudge。\n');
+  const judge = localUrl
+    ? new LocalJudge({ baseUrl: localUrl, model: process.env.VIGIL_MODEL ?? 'local-decider' })
+    : apiKey
+      ? new JevJudge({ apiKey, model: process.env.VIGIL_MODEL ?? 'jev-latest' })
+      : new MockJudge();
+  if (!localUrl && !apiKey && process.env.VIGIL_QUIET !== '1') {
+    process.stderr.write('[vigil] 未检测到 VIGIL_LOCAL_JUDGE 或 TYPESAFE_API_KEY，使用确定性 MockJudge。\n');
   }
-  return new Kernel({ ledger, judge, policy });
+  return new Kernel({ ledger, judge, policy, shapeThresholds: loadShapeThresholds() });
 }
 
 async function readStdin(): Promise<string> {
@@ -53,7 +94,13 @@ function usage(): void {
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
   vigil hook claude [--shadow]  作为 Claude Code 的 PreToolUse 钩子运行
   vigil ledger [--json]          列出全部决策
-  vigil verify                   校验哈希链完整性
+  vigil verify                   校验哈希链与签名完整性
+  vigil keygen                   生成 Ed25519 签名身份（之后的记录全部签名）
+  vigil bundle [文件]            导出离线验证包（含公钥，配 verify-standalone.mjs 用）
+  vigil thresholds [--write]     按题型推荐置信度阈值；--write 写入配置立即生效
+  vigil approvals                列出待人工审批的升级项
+  vigil approve <id> <approved|rejected> [备注] [--by 审批人]
+  vigil export-otel [文件]       导出 OTel GenAI JSONL（喂给 Langfuse/Phoenix）
   vigil postmortem <sessionId>   事后梳理
   vigil calibrate [问题名]        置信度校准（默认 proceed）
   vigil alerts                   扫描预警
@@ -61,9 +108,12 @@ function usage(): void {
   vigil mcp                      以 MCP stdio 服务端方式运行
 
 环境变量：
-  TYPESAFE_API_KEY   有则使用 Jev，无则退回 MockJudge
-  VIGIL_LEDGER       账本路径，默认 .vigil/ledger.ndjson
-  VIGIL_MODEL        模型名，默认 jev-latest
+  TYPESAFE_API_KEY     有则使用 Jev；VIGIL_LOCAL_JUDGE 优先
+  VIGIL_LOCAL_JUDGE    本地决策服务地址（strands-decider/laya），如 http://127.0.0.1:8000/v1/systemone
+  VIGIL_LEDGER         账本路径，默认 .vigil/ledger.ndjson
+  VIGIL_SIGNING_KEY    签名密钥路径，默认 .vigil/signing-key.json
+  VIGIL_THRESHOLDS     按题型阈值配置，默认 .vigil/thresholds.json
+  VIGIL_MODEL          模型名，默认 jev-latest
   VIGIL_SHADOW=1     影子模式：只记账不拦截
   VIGIL_ACTOR        agent 在账本里的身份，默认 agent/claude
 `);
@@ -87,7 +137,7 @@ async function main(): Promise<void> {
     }
 
     case 'ledger': {
-      const ledger = new Ledger(LEDGER_PATH);
+      const ledger = buildLedger({ publicKeyOnly: true });
       const records = ledger.all();
       if (rest.includes('--json')) {
         process.stdout.write(`${JSON.stringify(records, null, 2)}\n`);
@@ -104,17 +154,95 @@ async function main(): Promise<void> {
     }
 
     case 'verify': {
-      const ledger = new Ledger(LEDGER_PATH);
+      const ledger = buildLedger({ publicKeyOnly: true });
       const result = ledger.verify();
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
       if (!result.ok) process.exitCode = 1;
       return;
     }
 
+    case 'keygen': {
+      const identity = generateSigningIdentity();
+      saveSigningIdentity(identity, KEY_PATH);
+      process.stdout.write(`已生成签名身份：${KEY_PATH}\n公钥：\n${identity.publicKeyPem}\n`);
+      process.stdout.write('此后所有新记录都会被 Ed25519 签名。私钥务必备份——丢了就不能再追加能通过验签的记录。\n');
+      return;
+    }
+
+    case 'bundle': {
+      const ledger = buildLedger({ publicKeyOnly: true });
+      const identity = loadSigningIdentity(KEY_PATH);
+      const bundle = exportBundle(ledger, identity?.publicKeyPem);
+      const out = rest[0] ?? 'vigil-bundle.json';
+      writeFileSync(out, JSON.stringify(bundle, null, 2) + '\n', 'utf8');
+      process.stdout.write(`已导出 ${bundle.count} 条记录到 ${out}\n离线验证：node verify-standalone.mjs ${out}\n`);
+      return;
+    }
+
+    case 'thresholds': {
+      const ledger = buildLedger({ publicKeyOnly: true });
+      const report = adviseThresholds(ledger.all());
+      if (rest.includes('--json')) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+        return;
+      }
+      if (report.advices.length === 0) process.stdout.write('暂无可建议：先回填标签（vigil label），每题型至少 5 条。\n');
+      process.stdout.write(`${pad('题型', 12)}${pad('样本', 8)}${pad('推荐floor', 12)}${pad('实测精度', 12)}自动放行率\n`);
+      for (const advice of report.advices) {
+        process.stdout.write(
+          `${pad(advice.shape, 12)}${pad(String(advice.samples), 8)}${pad(advice.floor.toFixed(2), 12)}${pad((advice.precision * 100).toFixed(0) + '%', 12)}${(advice.coverage * 100).toFixed(0)}%\n`,
+        );
+      }
+      for (const item of report.insufficient) {
+        process.stdout.write(`· ${item.shape}：样本 ${item.samples} 条，不足或达不到目标精度，暂不自动放行\n`);
+      }
+      if (rest.includes('--write')) {
+        writeFileSync(THRESHOLDS_PATH, JSON.stringify(report.suggested, null, 2) + '\n', 'utf8');
+        process.stdout.write(`\n已写入 ${THRESHOLDS_PATH} —— 内核下次启动即按题型生效。\n`);
+      }
+      return;
+    }
+
+    case 'approvals': {
+      const ledger = buildLedger({ publicKeyOnly: true });
+      const pending = ledger.pendingApprovals();
+      if (pending.length === 0) {
+        process.stdout.write('没有待审批的升级项。\n');
+        return;
+      }
+      for (const record of pending) {
+        process.stdout.write(`[${record.decisionId}] #${record.seq} ${record.actor}：${record.intent}\n  └ ${record.hardBlocks.map((b) => b.detail).join('；') || '概率判断把握不足'}\n`);
+      }
+      return;
+    }
+
+    case 'approve':
+    case 'reject': {
+      const decisionId = rest[0];
+      const noteIndex = rest.findIndex((item) => item === '--by');
+      const by = noteIndex >= 0 ? (rest[noteIndex + 1] ?? 'human/unknown') : 'human/unknown';
+      const note = rest.slice(1, noteIndex >= 0 ? noteIndex : undefined).filter((item) => item !== '--by').join(' ') || undefined;
+      if (!decisionId) throw new Error(`用法：vigil ${command} <decisionId> [备注] [--by 审批人]`);
+      const ledger = buildLedger({ publicKeyOnly: true });
+      const info = ledger.approve({ decisionId, decision: command === 'approve' ? 'approved' : 'rejected', approver: by, note });
+      process.stdout.write(`已落账：${decisionId} = ${info.decision}（审批人 ${info.approver}，绑定哈希 ${info.boundHash.slice(0, 12)}…）\n`);
+      return;
+    }
+
+    case 'export-otel': {
+      const ledger = buildLedger({ publicKeyOnly: true });
+      const jsonl = toOtelJsonl(ledger.all());
+      const out = rest[0];
+      if (out) writeFileSync(out, jsonl + '\n', 'utf8');
+      else process.stdout.write(jsonl + '\n');
+      if (out) process.stdout.write(`已导出 OTel span 到 ${out}\n`);
+      return;
+    }
+
     case 'postmortem': {
       const sessionId = rest[0];
       if (!sessionId) throw new Error('缺少 sessionId');
-      const ledger = new Ledger(LEDGER_PATH);
+      const ledger = buildLedger({ publicKeyOnly: true });
       const report = postmortem(ledger, sessionId);
       if (rest.includes('--json')) {
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -147,7 +275,7 @@ async function main(): Promise<void> {
     }
 
     case 'calibrate': {
-      const ledger = new Ledger(LEDGER_PATH);
+      const ledger = buildLedger({ publicKeyOnly: true });
       const report = calibrate(ledger.all(), { question: rest[0] });
       if (rest.includes('--json')) {
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -172,7 +300,7 @@ async function main(): Promise<void> {
     }
 
     case 'alerts': {
-      const ledger = new Ledger(LEDGER_PATH);
+      const ledger = buildLedger({ publicKeyOnly: true });
       const alerts = scanAlerts(ledger, {
         windowMs: rest[0] ? Number(rest[0]) : undefined,
         costCapUsd: process.env.VIGIL_COST_CAP ? Number(process.env.VIGIL_COST_CAP) : undefined,
@@ -191,7 +319,7 @@ async function main(): Promise<void> {
     case 'label': {
       const [decisionId, label, note] = rest;
       if (!decisionId || !label) throw new Error('用法：vigil label <decisionId> <correct|wrong|unknown> [备注]');
-      const ledger = new Ledger(LEDGER_PATH);
+      const ledger = buildLedger({ publicKeyOnly: true });
       ledger.label(decisionId, label as OutcomeLabel, note);
       process.stdout.write(`已回填 ${decisionId} = ${label}\n`);
       return;

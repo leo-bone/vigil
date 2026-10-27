@@ -1,6 +1,6 @@
 # Vigil
 
-**AI 决策账本与熔断内核，带完整的五岔路统筹循环。** 让每一个 agent 的决定都可拦截、可追溯、可校准，让每一次派工都走路由、质量门、止损、验收、升级。
+**AI 决策账本与熔断内核，带完整的五岔路统筹循环。** 让每一个 agent 的决定都可拦截、可追溯、可校准、可签名验证，让每一次派工都走路由、质量门、止损、验收、升级。
 
 > 你的 agent 会做事，但没人记得它为什么这么做、错了谁负责、下次该改哪条规则。
 > Vigil 就是补上这一层的那块东西。
@@ -15,7 +15,10 @@
 │   └───验收（四项清单缺一不可）──通过──→ COMPLETED        │
 └────────────────── 每个岔路都是一次内核裁决 ───────────────┘
                               ↓
-                  只追加账本（哈希链）→ 事后梳理 → 校准 → 预警
+                  只追加账本（哈希链 + Ed25519 签名）
+                    ↓
+        事后梳理 → 校准 → 按题型自动调阈值 → 预警
+        导出离线验证包（第三方零依赖验证）/ OTel span
 
 agent 想动手  →  ┌──────────────┐  →  放行 / 转人工 / 否决
                   │    Vigil     │
@@ -158,12 +161,26 @@ vigil run -- npm test          # 退出码 0，正常执行
 ```bash
 vigil decide request.json     # 或从 stdin 读：vigil decide -
 vigil ledger                  # 列出所有决策
-vigil verify                  # 校验哈希链有没有断
+vigil verify                  # 校验哈希链 + Ed25519 签名
+vigil keygen                  # 生成签名身份，之后的记录全部签名
+vigil bundle                  # 导出离线验证包（第三方零依赖验证，见 verify-standalone.mjs）
+vigil thresholds --write      # 从你回填的标签按题型算推荐阈值，写回配置立即生效
+vigil approvals               # 列出待人工审批的升级项
+vigil approve <id> approved "同意" --by human/boss   # 审批落账，绑定记录哈希
+vigil export-otel spans.jsonl # 导出 OTel GenAI span，直接喂 Langfuse/Phoenix
 vigil postmortem <sessionId>  # 事后梳理
 vigil calibrate proceed       # 置信度校准 + 阈值扫描
 vigil alerts                  # 扫描预警
 vigil label <decisionId> wrong "客户否认需求"   # 回填结果
 ```
+
+判断模型三选一，按优先级：
+
+| 环境变量 | 后端 | 适用 |
+|---|---|---|
+| `VIGIL_LOCAL_JUDGE` | 本地决策服务（strands-decider / laya，/v1/systemone 方言） | 零成本、数据不出门、可用自有数据微调 |
+| `TYPESAFE_API_KEY` | TypeSafe Jev 云端 | 不想本地跑模型 |
+| 都不设 | MockJudge（确定性） | 测试、复现事故 |
 
 ### MCP（推荐）
 
@@ -257,9 +274,14 @@ const report = await company.runTask('sess_1', 'task_1', '写一份行业调研'
 诚实列出来，免得你踩：
 
 1. **单进程写入**。账本是 NDJSON + 内存索引，并发写会出问题。要上多人用就得换 SQLite/libsql —— 哈希链语义不变，这是刻意留的替换点。
-2. **规则库很薄**。8 条默认规则只覆盖了最常见的事故形态。真正的护城河是规则库随事故积累变厚，不是代码。
-3. **校准需要标签**。没有事后回填，`calibrate` 就是个空壳。这是运营问题，不是技术问题。
+2. **规则库很薄**。默认规则只覆盖了最常见的事故形态。真正的护城河是规则库随事故积累变厚，不是代码。
+3. **校准需要标签**。没有事后回填，`calibrate` 和 `thresholds` 就是个空壳。这是运营问题，不是技术问题。
 4. **判定不了"意图是否真诚"**。agent 说它要发邮件，实际可能干别的。Vigil 看的是动作形状，不是自述。要防这个得在工具边界强制执行，不在这一层。
+5. **阈值的"按题型建议"只覆盖放行方向**。风险型问题（escalateWhenTrue）的自动标定还没做，因为放行/拦截语义相反，需要更大样本才可靠。
+
+## 合规对照
+
+采购或审计场景看 [`docs/compliance-mapping.md`](docs/compliance-mapping.md)：OWASP Agentic Top 10 逐条对照（4 项完整覆盖、5 项部分覆盖），EU AI Act 相关义务映射。
 
 ## 路线图
 
@@ -269,7 +291,12 @@ const report = await company.runTask('sess_1', 'task_1', '写一份行业调研'
 - [x] MCP stdio 服务端（零依赖）
 - [x] Claude Code PreToolUse 钩子 + 通用命令包装器
 - [x] 五岔路统筹循环（路由 / 质量门 / 止损 / 验收 / 升级）
-- [ ] 统筹循环接入 MCP，让外部 agent 也能被编排
+- [x] Ed25519 账本签名 + 离线验证包（verify-standalone.mjs）
+- [x] 本地决策模型接入（strands-decider / laya / kev，/v1/systemone 方言）
+- [x] 按题型阈值自动建议与生效（校准闭环最后一公里）
+- [x] 审批事件绑定记录哈希 + 升级回调（人工可续命）
+- [x] OTel GenAI span 导出（进 Langfuse/Phoenix 生态）
+- [ ] `vigil scan` 上手工具：扫描 agent 代码自动生成治理配置
 - [ ] 多 agent 冲突仲裁 `Arbiter`：两个 agent 结论相反时按规则表决
 - [ ] 规则包市场：把每个行业的事故形态沉淀成可复用规则集
 - [ ] 存储层换 libsql，支持并发
