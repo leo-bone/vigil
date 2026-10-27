@@ -53,7 +53,7 @@ export type {
   EscalateResult,
   RiskTier,
 } from './pipeline/forks.ts';
-export { Orchestrator, createPipelineKernel } from './pipeline/orchestrator.ts';
+export { Orchestrator, createPipelineKernel, ACCEPTANCE_REQUIREMENTS } from './pipeline/orchestrator.ts';
 export type {
   OrchestratorOptions,
   WorkerRunContext,
@@ -61,7 +61,11 @@ export type {
   VigilWorker,
   TaskReport,
   TaskStatus,
+  PipelineState,
+  PipelineTurn,
+  RosterEntry,
 } from './pipeline/orchestrator.ts';
+export { handleMcpRequest } from './mcp/server.ts';
 export { classifyToolCall, buildQuestions, resolveSessionId, analyzeShell } from './hook/mapping.ts';
 export type { Classification, HookPayload, ShellRisk } from './hook/mapping.ts';
 export { runClaudeHook } from './hook/claude.ts';

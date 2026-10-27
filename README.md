@@ -103,7 +103,8 @@ git clone <this-repo> && cd vigil
 node examples/demo.ts        # 单线场景：裁决、复盘、校准、预警
 node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑三个任务，
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
-npm test                     # 49 个测试
+node examples/resumable.ts   # 可续跑统筹循环：外部 agent 扮演工人，跨调用跑完
+npm test                     # 57 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -230,9 +231,48 @@ vigil mcp
 claude mcp add vigil -- node /abs/path/to/vigil/src/cli.ts mcp
 ```
 
-暴露 6 个工具：`vigil_decide`、`vigil_postmortem`、`vigil_verify`、`vigil_alerts`、`vigil_calibrate`、`vigil_label`。
+暴露 9 个工具。
+
+**单点决策**（6 个）：`vigil_decide`、`vigil_postmortem`、`vigil_verify`、`vigil_alerts`、`vigil_calibrate`、`vigil_label`。
+
+**统筹循环**（3 个）：`vigil_task_start`、`vigil_task_submit`、`vigil_task_status`。
 
 约定：**agent 在动手之前必须调用 `vigil_decide`，拿到 `allow` 才执行。** 这不是靠自觉，是靠 hook —— 在 `PreToolUse` 里拦。
+
+#### 统筹循环：让外部 agent 扮演工人
+
+原本统筹循环只能在同一个进程里跑完，外部 agent 接不上 —— 它没法中途接管工人角色。
+现在它是一个**可跨调用续跑的状态机**，干活的可以是另一个进程：
+
+```jsonc
+// 1. 开任务：Vigil 决定下一个该谁干
+{"name": "vigil_task_start", "arguments": {
+  "task": "给客户 ACME 写一封报价邮件",
+  "roster": [{"id": "bot/writer", "role": "写手"}, {"id": "bot/checker", "role": "复核"}],
+  "taskId": "t1"
+}}
+// → {"turn": {"kind": "work", "workerId": "bot/writer", "attempt": 1,
+//              "instructions": "...", "requirements": [...]}}
+
+// 2. 外部 agent 按指令干活，然后交回
+{"name": "vigil_task_submit", "arguments": {
+  "taskId": "t1",
+  "summary": "写好草稿",
+  "claim": "报价邮件已完成",
+  "deliverableUri": "drafts/quote-acme.md",
+  "leftoverIssues": "",
+  "evidence": [{"id": "ev_check", "producedBy": "bot/checker", "verified": true}]
+}}
+// → 缺项则 {"turn": {"kind": "work", "attempt": 2, "feedback": "验收未过，缺：..."}}
+//   齐全则 {"turn": {"kind": "completed"}}
+```
+
+`requirements` 会把验收的四项清单直接告诉执行者，不让它猜。
+`feedback` 会把上轮被拒的具体原因带到下一轮，不用瞎改。
+
+**一个要知道的局限**：如果同一个 agent 既扮演执行者又扮演复核者，
+"独立核验"就退化成形式独立 —— 账本会如实记下谁产出了证据、谁声称完成，
+但真正的独立性需要两个进程。这一点我们没有假装解决。
 
 ### SDK
 
@@ -333,6 +373,7 @@ const report = await company.runTask('sess_1', 'task_1', '写一份行业调研'
 - [x] 审批事件绑定记录哈希 + 升级回调（人工可续命）
 - [x] OTel GenAI span 导出（进 Langfuse/Phoenix 生态）
 - [x] `vigil scan` 上手工具：扫描能力清单与风险，一键生成生效的治理配置
+- [x] 统筹循环接入 MCP（可续跑状态机，外部 agent 扮演工人）
 - [ ] 多 agent 冲突仲裁 `Arbiter`：两个 agent 结论相反时按规则表决
 - [ ] 规则包市场：把每个行业的事故形态沉淀成可复用规则集
 - [ ] 存储层换 libsql，支持并发

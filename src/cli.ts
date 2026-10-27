@@ -17,6 +17,8 @@ import { exportBundle } from './bundle.ts';
 import { toOtelJsonl } from './otel.ts';
 import { scanProject, prioritize } from './scan/index.ts';
 import { CONFIG_BASENAME, loadPolicyConfig, savePolicyConfig } from './policy/config.ts';
+import { Orchestrator, createPipelineKernel } from './pipeline/orchestrator.ts';
+import type { Judge } from './judge/index.ts';
 import {
   generateSigningIdentity,
   loadSigningIdentity,
@@ -57,18 +59,53 @@ function buildLedger(options: { signer?: boolean; publicKeyOnly?: boolean } = {}
   return new Ledger(LEDGER_PATH, signer ? { signer } : {});
 }
 
-function buildKernel(policy?: PolicyContext): Kernel {
-  const ledger = buildLedger();
+/**
+ * 没有真实判断模型时，可以用环境变量把假判断器调到指定表现。
+ *
+ * 例：VIGIL_MOCK_FIXED='{"quality_sufficient":0.9,"acceptance_criteria_met":0.92,"progress":4}'
+ * 这是"给假判断器喂一个剧本"，用来演示和复现事故，不是作弊——
+ * 换成真模型后这些环境变量就不起作用了。
+ */
+function mockOptions(): { fixed?: Record<string, number>; choices?: Record<string, string> } {
+  const options: { fixed?: Record<string, number>; choices?: Record<string, string> } = {};
+  const fixed = process.env.VIGIL_MOCK_FIXED;
+  if (fixed) {
+    try {
+      const parsed = JSON.parse(fixed) as Record<string, number>;
+      options.fixed = parsed;
+    } catch {
+      process.stderr.write('[vigil] VIGIL_MOCK_FIXED 不是合法 JSON，已忽略。\n');
+    }
+  }
+  const choices = process.env.VIGIL_MOCK_CHOICES;
+  if (choices) {
+    try {
+      options.choices = JSON.parse(choices) as Record<string, string>;
+    } catch {
+      process.stderr.write('[vigil] VIGIL_MOCK_CHOICES 不是合法 JSON，已忽略。\n');
+    }
+  }
+  return options;
+}
+
+function buildJudge(): Judge {
   const localUrl = process.env.VIGIL_LOCAL_JUDGE;
   const apiKey = process.env.TYPESAFE_API_KEY;
-  const judge = localUrl
-    ? new LocalJudge({ baseUrl: localUrl, model: process.env.VIGIL_MODEL ?? 'local-decider' })
-    : apiKey
-      ? new JevJudge({ apiKey, model: process.env.VIGIL_MODEL ?? 'jev-latest' })
-      : new MockJudge();
-  if (!localUrl && !apiKey && process.env.VIGIL_QUIET !== '1') {
+  if (localUrl) {
+    return new LocalJudge({ baseUrl: localUrl, model: process.env.VIGIL_MODEL ?? 'local-decider' });
+  }
+  if (apiKey) {
+    return new JevJudge({ apiKey, model: process.env.VIGIL_MODEL ?? 'jev-latest' });
+  }
+  if (process.env.VIGIL_QUIET !== '1') {
     process.stderr.write('[vigil] 未检测到 VIGIL_LOCAL_JUDGE 或 TYPESAFE_API_KEY，使用确定性 MockJudge。\n');
   }
+  return new MockJudge(mockOptions());
+}
+
+function buildKernel(policy?: PolicyContext): Kernel {
+  const ledger = buildLedger();
+  const judge = buildJudge();
   return new Kernel({ ledger, judge, policy, shapeThresholds: loadShapeThresholds() });
 }
 
@@ -137,6 +174,8 @@ function usage(): void {
 环境变量：
   TYPESAFE_API_KEY     有则使用 Jev；VIGIL_LOCAL_JUDGE 优先
   VIGIL_LOCAL_JUDGE    本地决策服务地址（strands-decider/laya），如 http://127.0.0.1:8000/v1/systemone
+  VIGIL_MOCK_FIXED     给 MockJudge 喂剧本，如 {"progress":4,"quality_sufficient":0.9}
+  VIGIL_MOCK_CHOICES   给 MockJudge 指定选择题答案，如 {"next_worker":"bot/writer"}
   VIGIL_LEDGER         账本路径，默认 .vigil/ledger.ndjson
   VIGIL_CONFIG         策略配置路径，默认 vigil.config.json
   VIGIL_SIGNING_KEY    签名密钥路径，默认 .vigil/signing-key.json
@@ -429,7 +468,20 @@ async function main(): Promise<void> {
     }
 
     case 'mcp': {
-      startMcpServer(buildKernel());
+      // 统筹循环用带流水线规则的内核（验收清单、重试上限、自产自验识别），
+      // 与对外动作的内核共用同一本账本。
+      const ledger = buildLedger();
+      const judge = buildJudge();
+      const kernel = new Kernel({
+        ledger,
+        judge,
+        policy: currentPolicy(),
+        shapeThresholds: loadShapeThresholds(),
+      });
+      const orchestrator = new Orchestrator(
+        createPipelineKernel(ledger, judge, currentPolicy(), { shapeThresholds: loadShapeThresholds() }),
+      );
+      startMcpServer(kernel, orchestrator);
       return;
     }
 

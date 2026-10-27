@@ -1,9 +1,10 @@
 import { createInterface } from 'node:readline';
 import type { Kernel } from '../kernel.ts';
-import type { DecisionRequest, OutcomeLabel } from '../types.ts';
+import type { DecisionRequest, Evidence, OutcomeLabel } from '../types.ts';
 import { postmortem } from '../review/postmortem.ts';
 import { calibrate } from '../review/calibrate.ts';
 import { scanAlerts } from '../alerts.ts';
+import type { Orchestrator, PipelineState } from '../pipeline/orchestrator.ts';
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -130,6 +131,73 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'vigil_task_start',
+    description:
+      '开一个受监督的任务。Vigil 走止损与路由，决定下一个该谁干，并把派工指令交给你 —— 干活的是你（可以扮演不同角色），不是本进程。干完用 vigil_task_submit 交回结果。',
+    inputSchema: {
+      type: 'object',
+      required: ['task', 'roster'],
+      properties: {
+        task: { type: 'string', description: '任务描述，一句话说清要达成什么' },
+        roster: {
+          type: 'array',
+          description: '可被路由到的执行者名册。id 是身份标识，role 是这个角色该干什么',
+          items: {
+            type: 'object',
+            required: ['id', 'role'],
+            properties: {
+              id: { type: 'string', description: '执行者 id，如 bot/writer' },
+              role: { type: 'string', description: '角色说明，如 负责撰写初稿' },
+            },
+          },
+        },
+        taskId: { type: 'string', description: '任务 id，不填则自动生成' },
+        sessionId: { type: 'string', description: '会话 id，不填则按 taskId 生成' },
+      },
+    },
+  },
+  {
+    name: 'vigil_task_submit',
+    description:
+      '交回一轮干活的成果。Vigil 会先落账，再走质量门与验收：通过就结束任务；不过则带着具体原因重新派工。缺项不会被模型的高分掩盖。',
+    inputSchema: {
+      type: 'object',
+      required: ['taskId', 'summary', 'claim'],
+      properties: {
+        taskId: { type: 'string' },
+        summary: { type: 'string', description: '这一轮实际做了什么' },
+        claim: { type: 'string', description: '你对完成度的主张' },
+        evidence: {
+          type: 'array',
+          description: '支撑主张的证据。验收要求至少一份 verified=true 且 producedBy 不等于执行者本人',
+          items: {
+            type: 'object',
+            required: ['id', 'producedBy'],
+            properties: {
+              id: { type: 'string' },
+              producedBy: { type: 'string', description: '证据产出者，用于检测自己批自己' },
+              claim: { type: 'string' },
+              verified: { type: 'boolean' },
+              uri: { type: 'string' },
+            },
+          },
+        },
+        deliverableUri: { type: 'string', description: '交付物位置。没有位置等于没有交付物' },
+        leftoverIssues: { type: 'string', description: '遗留问题声明，必须显式给出；没有遗留问题就写空字符串' },
+        costUsd: { type: 'number' },
+      },
+    },
+  },
+  {
+    name: 'vigil_task_status',
+    description: '查看任务当前状态：轮到谁、试了几次、每个岔路怎么走的。断线后用来恢复上下文。',
+    inputSchema: {
+      type: 'object',
+      required: ['taskId'],
+      properties: { taskId: { type: 'string' } },
+    },
+  },
 ];
 
 function textResult(payload: unknown) {
@@ -138,13 +206,46 @@ function textResult(payload: unknown) {
   };
 }
 
-async function handle(method: string, params: Record<string, unknown>, kernel: Kernel): Promise<unknown> {
+/** 任务状态的对外摘要：够外部 agent 判断下一步，又不至于把内部结构全抖出来 */
+function stateSummary(state: PipelineState | undefined): unknown {
+  if (!state) return null;
+  return {
+    taskId: state.taskId,
+    sessionId: state.sessionId,
+    task: state.task,
+    status: state.status ?? 'running',
+    attempts: state.attempts,
+    consecutiveFailures: state.consecutiveFailures,
+    pending: state.pending,
+    escalatedTo: state.escalatedTo,
+    reason: state.reason,
+    steps: state.steps,
+    workerTrace: state.trace,
+  };
+}
+
+/** 导出以便测试直接驱动协议层，不必起子进程 */
+export async function handleMcpRequest(
+  method: string,
+  params: Record<string, unknown>,
+  kernel: Kernel,
+  orchestrator?: Orchestrator,
+): Promise<unknown> {
+  return handle(method, params, kernel, orchestrator);
+}
+
+async function handle(
+  method: string,
+  params: Record<string, unknown>,
+  kernel: Kernel,
+  orchestrator?: Orchestrator,
+): Promise<unknown> {
   switch (method) {
     case 'initialize':
       return {
         protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: { name: 'vigil', version: '0.1.0' },
+        serverInfo: { name: 'vigil', version: '0.2.0' },
       };
     case 'ping':
       return {};
@@ -178,6 +279,40 @@ async function handle(method: string, params: Record<string, unknown>, kernel: K
           );
           return textResult({ ok: true });
         }
+        case 'vigil_task_start': {
+          if (!orchestrator) throw new Error('当前未启用统筹循环');
+          const roster = (args.roster ?? []) as Array<{ id: string; role: string }>;
+          if (roster.length === 0) throw new Error('名册不能为空：至少列出一个可以被路由到的执行者');
+          const taskId = String(args.taskId ?? `task_${Date.now().toString(36)}`);
+          const sessionId = String(args.sessionId ?? `sess_${taskId}`);
+          const turn = await orchestrator.begin({
+            sessionId,
+            taskId,
+            task: String(args.task ?? ''),
+            roster,
+          });
+          return textResult({ turn, state: stateSummary(orchestrator.state(taskId)) });
+        }
+        case 'vigil_task_submit': {
+          if (!orchestrator) throw new Error('当前未启用统筹循环');
+          const taskId = String(args.taskId ?? '');
+          const turn = await orchestrator.submit(taskId, {
+            summary: String(args.summary ?? ''),
+            claim: String(args.claim ?? ''),
+            evidence: ((args.evidence ?? []) as Evidence[]),
+            deliverableUri: args.deliverableUri as string | undefined,
+            leftoverIssues: args.leftoverIssues as string | undefined,
+            costUsd: args.costUsd as number | undefined,
+          });
+          return textResult({ turn, state: stateSummary(orchestrator.state(taskId)) });
+        }
+        case 'vigil_task_status': {
+          if (!orchestrator) throw new Error('当前未启用统筹循环');
+          const taskId = String(args.taskId ?? '');
+          const state = orchestrator.state(taskId);
+          if (!state) throw new Error(`未知任务 ${taskId}`);
+          return textResult(stateSummary(state));
+        }
         default:
           throw new Error(`未知工具：${name}`);
       }
@@ -193,8 +328,11 @@ async function handle(method: string, params: Record<string, unknown>, kernel: K
  * 刻意不引入 SDK：整个项目运行时零依赖，`npx` 起来就能用。
  * 协议只实现 initialize / tools/list / tools/call / ping，
  * 这已经覆盖了 99% 的客户端场景。
+ *
+ * 传入 orchestrator 就同时开放统筹循环的三个工具，
+ * 外部 agent 可以扮演工人，把整条决策回路跑起来。
  */
-export function startMcpServer(kernel: Kernel): void {
+export function startMcpServer(kernel: Kernel, orchestrator?: Orchestrator): void {
   const rl = createInterface({ input: process.stdin });
   let queue: Promise<void> = Promise.resolve();
 
@@ -215,7 +353,7 @@ export function startMcpServer(kernel: Kernel): void {
       // 通知类消息没有 id，不需要回包
       if (message.id === undefined) return;
       try {
-        const result = await handle(message.method, message.params ?? {}, kernel);
+        const result = await handle(message.method, message.params ?? {}, kernel, orchestrator);
         write({ jsonrpc: '2.0', id: message.id, result });
       } catch (error) {
         write({

@@ -1,6 +1,6 @@
 {
   "name": "vigil-oversight",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI 决策账本与熔断内核：让每一个 agent 的决定可拦截、可追溯、可校准",
   "type": "module",
   "license": "MIT",
@@ -25,6 +25,8 @@
   ],
   "scripts": {
     "demo": "node examples/demo.ts",
+    "demo:company": "node examples/company.ts",
+    "demo:resumable": "node examples/resumable.ts",
     "dev": "node src/cli.ts",
     "mcp": "node src/cli.ts mcp",
     "test": "node --test tests/*.test.ts",

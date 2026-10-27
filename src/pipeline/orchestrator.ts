@@ -34,6 +34,11 @@ export type { RiskTier };
  *
  * "监督过程"不是独立模块：循环里的每个判断都是一次被记录的裁决，
  * 事后 postmortem(sessionId) 能完整回放每一步为什么这么走。
+ *
+ * 实现上是一个**可跨调用续跑的状态机**：
+ * begin() 决定下一个该谁干，submit() 接收干完的结果并给出下一步。
+ * 进程内可以直接 runTask() 跑完整循环；跨进程（MCP 场景）则由宿主
+ * 分别调用这两个接口 —— 干活的可以是另一个 agent，不一定是本进程。
  */
 
 export interface WorkerRunContext {
@@ -110,6 +115,64 @@ export interface TaskReport {
   reason: string;
 }
 
+/** 名册里的一项：一个可以被路由到的执行者 */
+export interface RosterEntry {
+  id: string;
+  role: string;
+}
+
+/** 任务在任意时刻的状态。跨调用续跑靠的就是它。 */
+export interface PipelineState {
+  sessionId: string;
+  taskId: string;
+  task: string;
+  roster: RosterEntry[];
+  attempts: number;
+  consecutiveFailures: number;
+  /** 上一轮退回的具体原因 */
+  feedback?: string;
+  /** 每个岔路的走向 */
+  steps: string[];
+  /** 每个工人实际干了什么 */
+  trace: string[];
+  /** 已经走过的岔路数，用于防御性上限 */
+  turns: number;
+  /** 当前在等谁的交付 */
+  pending?: { workerId: string; role: string; attempt: number };
+  status?: TaskStatus;
+  escalatedTo?: RiskTier;
+  reason?: string;
+}
+
+/**
+ * 一次交接。宿主拿到它就知道现在该做什么。
+ *
+ * work = 轮到你干活了；其余三种是终态。
+ */
+export type PipelineTurn =
+  | {
+      kind: 'work';
+      workerId: string;
+      role: string;
+      attempt: number;
+      /** 上一轮退回的原因，没有则为空 */
+      feedback?: string;
+      /** 给执行者的具体指令 */
+      instructions: string;
+      /** 交回来时必须包含什么，缺一项验收就过不了 */
+      requirements: string[];
+    }
+  | { kind: 'escalated'; tier: RiskTier; reason: string }
+  | { kind: 'stopped'; reason: string }
+  | { kind: 'completed'; claim: string; report: TaskReport };
+
+/** 验收的四项硬清单，缺一项都不算完成 */
+export const ACCEPTANCE_REQUIREMENTS = [
+  '交付物及位置：deliverableUri 必须给出真实位置',
+  '独立核验记录：evidence 里至少一份 verified=true，且 producedBy 不等于执行者本人',
+  '遗留问题声明：leftoverIssues 必须显式给出（没有遗留问题就写空字符串）',
+];
+
 export class Orchestrator {
   #kernel: Kernel;
   #maxAttempts: number;
@@ -117,6 +180,7 @@ export class Orchestrator {
   #maxSteps: number;
   #onEscalation?: NonNullable<OrchestratorOptions['onEscalation']>;
   #maxEscalations: number;
+  #states = new Map<string, PipelineState>();
 
   constructor(kernel: Kernel, options: OrchestratorOptions = {}) {
     this.#kernel = kernel;
@@ -131,132 +195,225 @@ export class Orchestrator {
     return this.#kernel;
   }
 
-  async runTask(sessionId: string, taskId: string, task: string, workers: VigilWorker[]): Promise<TaskReport> {
-    const steps: string[] = [];
-    const trace: string[] = [];
-    let attempts = 0;
-    let consecutiveFailures = 0;
-    let feedback: string | undefined;
-    let reason = '';
+  /** 任务当前状态，用于断线后恢复 */
+  state(taskId: string): PipelineState | undefined {
+    return this.#states.get(taskId);
+  }
 
-    for (let step = 0; step < this.#maxSteps; step += 1) {
-      // 1. 止损：先看历史，够差就别再路由了（首轮没有历史，跳过）
-      if (attempts > 0) {
-        const stop = await forkStopLoss(this.#kernel, {
-          sessionId,
-          taskId,
-          attempts,
-          maxAttempts: this.#maxAttempts,
-          consecutiveFailures,
-          failureThreshold: this.#failureThreshold,
-          stateSummary: feedback ?? '',
-        });
-        steps.push(`止损：${stop.stop ? '触发' : '继续'}（${stop.reason}）`);
-        if (stop.stop) {
-          reason = `止损退出：${stop.reason}`;
-          return this.#report(sessionId, taskId, task, 'stopped', attempts, steps, trace, reason);
-        }
-      }
+  /**
+   * 开一个新任务：走止损（首轮跳过）→ 路由，交给宿主去派工。
+   *
+   * 返回 work 回合表示"该 workerId 干活了"；
+   * 返回 escalated / stopped 就是终态。
+   */
+  async begin(input: { sessionId: string; taskId: string; task: string; roster: RosterEntry[] }): Promise<PipelineTurn> {
+    const state: PipelineState = {
+      sessionId: input.sessionId,
+      taskId: input.taskId,
+      task: input.task,
+      roster: input.roster,
+      attempts: 0,
+      consecutiveFailures: 0,
+      steps: [],
+      trace: [],
+      turns: 0,
+    };
+    this.#states.set(input.taskId, state);
+    return this.#route(state);
+  }
 
-      // 2. 路由
-      const route = await forkRoute(this.#kernel, {
-        sessionId,
-        taskId,
-        task,
-        stateSummary: feedback ?? '任务刚接手，尚无进展',
-        roster: workers.map((w) => ({ id: w.id, role: w.role })),
-      });
-      steps.push(`路由：${route.workerId ?? '人工'}（${route.reason}）`);
-      if (route.needsHuman) {
-        const escalation = await forkEscalate(this.#kernel, {
-          sessionId,
-          taskId,
-          reason: route.reason,
-          stateSummary: feedback,
-        });
-        steps.push(`升级：${escalation.tier}`);
-        // 人工续命：宿主回调决定，批准则落账后继续，拒绝或超限则终止
-        const handled = await this.#handleEscalation(sessionId, taskId, route.reason, escalation.tier, escalation.verdict, steps);
-        if (!handled) {
-          return this.#report(sessionId, taskId, task, 'escalated', attempts, steps, trace, route.reason, escalation.tier);
-        }
-        feedback = `人工批准继续（${route.reason}），已重新路由`;
-        continue;
-      }
-      const worker = workers.find((w) => w.id === route.workerId)!;
-      attempts += 1;
+  /**
+   * 交回一轮干活的成果：落账 → 质量门 → 验收。
+   *
+   * 过不了就带着具体原因重新路由；过了就是终态。
+   */
+  async submit(taskId: string, output: WorkerOutput): Promise<PipelineTurn> {
+    const state = this.#states.get(taskId);
+    if (!state) throw new Error(`未知任务 ${taskId}：先调用 vigil_task_start`);
+    if (!state.pending) throw new Error(`任务 ${taskId} 当前没有等待交付，可能已经结束`);
 
-      // 3. 干活。执行本身也过一遍内核落账 —— 监督过程覆盖每一轮，不只覆盖岔路
-      const output = await worker.run({ task, taskId, attempt: attempts, feedback });
-      const workVerdict = await this.#kernel.decide({
-        sessionId,
-        actor: worker.id,
-        intent: `执行任务 ${taskId}（第 ${attempts} 次）：${output.summary}`,
-        action: { kind: 'work', target: taskId, reversible: true, external: false },
-        costUsd: output.costUsd,
-      });
-      trace.push(`${worker.id}（第 ${attempts} 次）：${output.summary}`);
-      steps.push(`执行：${worker.id} → ${workVerdict.outcome}`);
+    const { workerId, attempt } = state.pending;
+    state.pending = undefined;
 
-      // 4. 质量门：独立检查者复核，结构上批不了自己的卷子
-      const quality = await forkQualityGate(this.#kernel, {
-        sessionId,
-        taskId,
-        producer: worker.id,
-        claim: output.claim,
-        material: [output.summary, ...output.evidence.map((e) => `${e.id}:${e.claim ?? ''}`)].join('\n'),
-      });
-      steps.push(`质量门：${quality.passed ? '通过' : '退回'}（${quality.reason}）`);
-      if (!quality.passed) {
-        consecutiveFailures += 1;
-        feedback = `质量门退回：${quality.reason}`;
-        continue;
-      }
+    // 干活本身也要过一遍内核落账 —— 监督覆盖每一轮，不只覆盖岔路
+    const workVerdict = await this.#kernel.decide({
+      sessionId: state.sessionId,
+      actor: workerId,
+      intent: `执行任务 ${taskId}（第 ${attempt} 次）：${output.summary}`,
+      action: { kind: 'work', target: taskId, reversible: true, external: false },
+      costUsd: output.costUsd,
+    });
+    state.trace.push(`${workerId}（第 ${attempt} 次）：${output.summary}`);
+    state.steps.push(`执行：${workerId} → ${workVerdict.outcome}`);
 
-      // 5. 验收：四项清单缺一不可，模型说了不算
-      const acceptance = await forkAcceptance(this.#kernel, {
-        sessionId,
-        taskId,
-        claimant: worker.id,
-        claim: output.claim,
-        deliverableUri: output.deliverableUri,
-        evidence: output.evidence,
-        leftoverIssues: output.leftoverIssues,
-        stateSummary: output.summary,
-      });
-      steps.push(
-        `验收：${acceptance.accepted ? '通过' : `未过（缺 ${acceptance.missing.join('、')}）`}`,
-      );
-      if (acceptance.accepted) {
-        reason = `任务完成：${output.claim}`;
-        return this.#report(sessionId, taskId, task, 'completed', attempts, steps, trace, reason);
-      }
-      consecutiveFailures += 1;
-      feedback = `验收未过，缺：${acceptance.missing.join('、')}。${acceptance.reason}`;
+    // 质量门：独立检查者复核，结构上批不了自己的卷子
+    const quality = await forkQualityGate(this.#kernel, {
+      sessionId: state.sessionId,
+      taskId,
+      producer: workerId,
+      claim: output.claim,
+      material: [output.summary, ...output.evidence.map((e) => `${e.id}:${e.claim ?? ''}`)].join('\n'),
+    });
+    state.steps.push(`质量门：${quality.passed ? '通过' : '退回'}（${quality.reason}）`);
+    if (!quality.passed) {
+      state.consecutiveFailures += 1;
+      state.feedback = `质量门退回：${quality.reason}`;
+      return this.#route(state);
     }
 
-    reason = `编排步数超过防御上限 ${this.#maxSteps}，强制止损`;
-    return this.#report(sessionId, taskId, task, 'stopped', attempts, steps, trace, reason);
+    // 验收：四项清单缺一不可，模型说了不算
+    const acceptance = await forkAcceptance(this.#kernel, {
+      sessionId: state.sessionId,
+      taskId,
+      claimant: workerId,
+      claim: output.claim,
+      deliverableUri: output.deliverableUri,
+      evidence: output.evidence,
+      leftoverIssues: output.leftoverIssues,
+      stateSummary: output.summary,
+    });
+    state.steps.push(`验收：${acceptance.accepted ? '通过' : `未过（缺 ${acceptance.missing.join('、')}）`}`);
+    if (acceptance.accepted) {
+      state.status = 'completed';
+      state.reason = `任务完成：${output.claim}`;
+      return { kind: 'completed', claim: output.claim, report: this.#report(state) };
+    }
+    state.consecutiveFailures += 1;
+    state.feedback = `验收未过，缺：${acceptance.missing.join('、')}。${acceptance.reason}`;
+    return this.#route(state);
+  }
+
+  /**
+   * 进程内跑完整循环。跨进程场景用 begin() / submit() 两次调用。
+   */
+  async runTask(sessionId: string, taskId: string, task: string, workers: VigilWorker[]): Promise<TaskReport> {
+    const roster = workers.map((worker) => ({ id: worker.id, role: worker.role }));
+    let turn = await this.begin({ sessionId, taskId, task, roster });
+
+    // 用 for + 显式 break 而不是 while (turn.kind === 'work')：
+    // 循环体内给 turn 重新赋值后，TypeScript 的控制流分析会把
+    // 条件里的窄化结果作废（回边汇合处类型退化成整个联合类型）。
+    for (;;) {
+      if (turn.kind !== 'work') break;
+      // 先取成 const：turn 是 let，类型窄化不会传进闭包，
+      // 在 find 的回调里直接读 turn.workerId 编译不过。
+      const { workerId, attempt, feedback } = turn;
+      const worker = workers.find((candidate) => candidate.id === workerId);
+      if (!worker) throw new Error(`名册里没有 ${workerId}`);
+      const output = await worker.run({
+        task,
+        taskId,
+        attempt,
+        feedback,
+      });
+      turn = await this.submit(taskId, output);
+    }
+
+    const state = this.#states.get(taskId)!;
+    return this.#report(state);
+  }
+
+  /** 止损 + 路由。返回 work 回合表示派工成功。 */
+  async #route(state: PipelineState): Promise<PipelineTurn> {
+    state.turns += 1;
+    if (state.turns > this.#maxSteps) {
+      state.status = 'stopped';
+      state.reason = `编排步数超过防御上限 ${this.#maxSteps}，强制止损`;
+      return { kind: 'stopped', reason: state.reason };
+    }
+
+    // 止损：先看历史，够差就别再路由了
+    if (state.attempts > 0) {
+      const stop = await forkStopLoss(this.#kernel, {
+        sessionId: state.sessionId,
+        taskId: state.taskId,
+        attempts: state.attempts,
+        maxAttempts: this.#maxAttempts,
+        consecutiveFailures: state.consecutiveFailures,
+        failureThreshold: this.#failureThreshold,
+        stateSummary: state.feedback ?? '',
+      });
+      state.steps.push(`止损：${stop.stop ? '触发' : '继续'}（${stop.reason}）`);
+      if (stop.stop) {
+        state.status = 'stopped';
+        state.reason = `止损退出：${stop.reason}`;
+        return { kind: 'stopped', reason: state.reason };
+      }
+    }
+
+    const route = await forkRoute(this.#kernel, {
+      sessionId: state.sessionId,
+      taskId: state.taskId,
+      task: state.task,
+      stateSummary: state.feedback ?? '任务刚接手，尚无进展',
+      roster: state.roster,
+    });
+    state.steps.push(`路由：${route.workerId ?? '人工'}（${route.reason}）`);
+
+    if (route.needsHuman) {
+      const escalation = await forkEscalate(this.#kernel, {
+        sessionId: state.sessionId,
+        taskId: state.taskId,
+        reason: route.reason,
+        stateSummary: state.feedback,
+      });
+      state.steps.push(`升级：${escalation.tier}`);
+      const handled = await this.#handleEscalation(state, route.reason, escalation.tier, escalation.verdict);
+      if (!handled) {
+        state.status = 'escalated';
+        state.escalatedTo = escalation.tier;
+        state.reason = route.reason;
+        return { kind: 'escalated', tier: escalation.tier, reason: route.reason };
+      }
+      state.feedback = `人工批准继续（${route.reason}），已重新路由`;
+      return this.#route(state);
+    }
+
+    const entry = state.roster.find((candidate) => candidate.id === route.workerId)!;
+    state.attempts += 1;
+    state.pending = { workerId: entry.id, role: entry.role, attempt: state.attempts };
+
+    const instructions = [
+      `以「${entry.role}」的身份完成任务：${state.task}`,
+      state.feedback ? `上一轮被退回，请针对性修正：${state.feedback}` : '',
+      `完成后用 vigil_task_submit 交回结果（第 ${state.attempts} 次尝试）。`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    return {
+      kind: 'work',
+      workerId: entry.id,
+      role: entry.role,
+      attempt: state.attempts,
+      feedback: state.feedback,
+      instructions,
+      requirements: [...ACCEPTANCE_REQUIREMENTS],
+    };
   }
 
   /** 升级处理：无回调或回调说 abort → false（终止）；批准 → true（续命次数 +1，超限终止） */
   async #handleEscalation(
-    sessionId: string,
-    taskId: string,
+    state: PipelineState,
     reason: string,
     tier: RiskTier,
     verdict: Verdict,
-    steps: string[],
   ): Promise<boolean> {
     if (!this.#onEscalation) return false;
     const used = this.#kernel.ledger
-      .bySession(sessionId)
-      .filter((r) => r.approval?.decision === 'approved').length;
+      .bySession(state.sessionId)
+      .filter((record) => record.approval?.decision === 'approved').length;
     if (used >= this.#maxEscalations) {
-      steps.push(`人工续命已达上限 ${this.#maxEscalations} 次，终止`);
+      state.steps.push(`人工续命已达上限 ${this.#maxEscalations} 次，终止`);
       return false;
     }
-    const answer = await this.#onEscalation({ sessionId, taskId, reason, tier, verdict });
+    const answer = await this.#onEscalation({
+      sessionId: state.sessionId,
+      taskId: state.taskId,
+      reason,
+      tier,
+      verdict,
+    });
     if (answer !== 'retry') return false;
     // 审批落账并绑定升级记录哈希：事后能对上"人到底批的是哪条"
     this.#kernel.ledger.approve({
@@ -265,32 +422,22 @@ export class Orchestrator {
       approver: 'orchestrator/onEscalation',
       note: reason,
     });
-    steps.push(`人工批准继续（第 ${used + 1} 次续命）`);
+    state.steps.push(`人工批准继续（第 ${used + 1} 次续命）`);
     return true;
   }
 
-  #report(
-    sessionId: string,
-    taskId: string,
-    task: string,
-    status: TaskStatus,
-    attempts: number,
-    steps: string[],
-    trace: string[],
-    reason: string,
-    escalatedTo?: RiskTier,
-  ): TaskReport {
+  #report(state: PipelineState): TaskReport {
     return {
-      sessionId,
-      taskId,
-      task,
-      status,
-      attempts,
-      spendUsd: this.#kernel.ledger.sessionSpend(sessionId),
-      steps,
-      workerTrace: trace,
-      escalatedTo,
-      reason,
+      sessionId: state.sessionId,
+      taskId: state.taskId,
+      task: state.task,
+      status: state.status ?? 'stopped',
+      attempts: state.attempts,
+      spendUsd: this.#kernel.ledger.sessionSpend(state.sessionId),
+      steps: state.steps,
+      workerTrace: state.trace,
+      escalatedTo: state.escalatedTo,
+      reason: state.reason ?? '',
     };
   }
 }
