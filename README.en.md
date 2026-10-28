@@ -120,16 +120,45 @@ The original design put "money" and "irreversible" on the same level. We split t
 
 1. **Know in real time** — every step of the loop emits events (goal / evidence / decision / gate / execute), printed live and persisted to an event stream, so even with the chat closed you can `vigil loop --watch <id>` to replay every step.
 2. **Execute by logic + let you confirm the important node before closing the loop** — an action that is external AND irreversible (spending money) must pass a human-confirmation gate (`--resume <id> --confirm`) before it actually executes; reversible / non-external actions are released automatically.
-3. **Evidence must be real and complete** — before deciding, every channel class required by that decision type must be covered (official / ecommerce / education / national subsidy / student subsidy / offline / trade-in); **missing even one class forbids the decision**, nipping the "only checked online prices and misjudged over-budget" failure in the bud.
+3. **Evidence must be real and complete** — before deciding, every evidence dimension required by that domain must be covered (authoritative / market / regulatory / financial / risk / expert / alternative / peer); **missing even one dimension forbids the decision**, nipping the "only checked online prices and misjudged over-budget" failure in the bud.
 
 ### Four pillars
 
 | Pillar | Implementation | What it fixes |
 |---|---|---|
 | Live events | `LoopEventBus`, every stage `emit`s a visible event persisted to `events-<id>.jsonl` | No more silent analysis — every step is visible |
-| Evidence-completeness gate | `checkCompleteness`, enumerates required channel classes by decision type; missing one → `blocked` | Deciding with incomplete evidence = blind decision, hard-blocked |
+| Evidence-completeness gate | `checkCompleteness`, enumerates required evidence dimensions by domain; missing one (or unverified) → `blocked` | Deciding with incomplete/unverified evidence = blind decision, hard-blocked |
 | Confirmation gate (HITL) | `isGatedAction = external && !reversible`, on hit → suspend `awaiting_confirmation` | Money actions 100% human-confirmed before execution (mirrors Operator's financial-transaction guardrails) |
 | Pausable / resumable | state persisted to `loop-<id>.json`, `resume(confirmed)` restores | Can suspend while awaiting confirmation or price drops, without losing progress |
+
+### Decision-domain registry (covers a whole life, not just shopping)
+
+The evidence gate is general because **evidence dimensions are a cross-domain vocabulary**, and each life domain picks the subset it requires:
+
+| Dimension | Meaning |
+|---|---|
+| authoritative | Official/authoritative sources: policy, regulation, official pricing, official guidelines |
+| market | Market/commerce: price, supply, competitors, quotes, comparison |
+| peer | Real user/community experience: word of mouth, pitfalls, long-term ownership feedback |
+| expert | Professionals/experts: doctors, lawyers, industry people, consultants |
+| regulatory | Compliance/policy/qualification: licenses, certification, subsidies, entry/immigration, legal risk |
+| financial | Cost/financial impact: total cost of ownership, hidden fees, cash flow, interest, reimbursement |
+| risk | Risk/safety: health, safety, exit cost, blow-up, fraud, side effects |
+| alternative | Alternative comparison: better / cheaper / safer / more compliant choice |
+
+Registered domains (`vigil domains` to view):
+
+| Domain | key | Required dimensions | Excluded |
+|---|---|---|---|
+| Shopping | purchase | authoritative / market / regulatory / financial / alternative / peer | — |
+| Medical | medical | authoritative / expert / regulatory / risk / financial / alternative | market (sales pitch doesn't count) |
+| Education | education | authoritative / expert / regulatory / financial / alternative / risk | — |
+| Travel | travel | authoritative / market / regulatory / risk / financial / alternative | — |
+| Financing | financing | authoritative / regulatory / financial / risk / expert / alternative | market (sales pitch doesn't count) |
+| Work | work | authoritative / expert / financial / risk / alternative / regulatory | — |
+| Housing | housing | authoritative / market / regulatory / financial / risk / alternative | — |
+
+**To add a new domain (insurance / marriage / immigration / retirement …), just add one entry to `DECISION_DOMAINS` and the evidence gate applies automatically.**
 
 ### State machine
 
@@ -143,9 +172,9 @@ goal_received → plan → evidence_gathered → [evidence_complete | evidence_g
 ### Real run: buying a MacBook Neo (budget 4000, keep the old machine)
 
 ```bash
-# 1) Start a loop, loading full-channel evidence (see decisions/neo-goal.json)
-node src/cli.ts loop decisions/neo-goal.json
-# prints: 7 channel evidences (official/ecommerce/education/national subsidy/student subsidy/offline/trade-in, all verified)
+# 1) Start a loop, loading full-dimension evidence (see examples/goal-neo-purchase.json)
+node src/cli.ts loop examples/goal-neo-purchase.json
+# prints: 6 evidence dimensions (authoritative/market/regulatory/financial/alternative/peer, all verified)
 #         → evidence complete, released → decision require_human → ⏸ confirmation gate suspended (awaiting_confirmation)
 
 # 2) After reviewing the event stream and confirming, release the closed loop
@@ -158,6 +187,8 @@ node src/cli.ts loop --watch lp_xxxx
 
 Key correction: the first pass only checked online prices (5499) and misjudged "over-budget, deny." After adding the national subsidy 15% (4599→3909), education 3999, student subsidy + offline ~4030, **the post-subsidy actual payment is at or below 4000 — the budget constraint is satisfied** — which is exactly why the evidence-completeness gate exists.
 
+The same mechanism is verified on **non-purchase domains**: `examples/goal-medical.json` (elective coronary stent, 6 dimensions all verified → gate suspended → confirm → closed loop) and `examples/goal-financing.json` (200k business loan, all financing dimensions covered and sales-pitch excluded → gate suspended → confirm → closed loop). **This is not a "buy-a-laptop" tool — it's a general framework for clothing/food/housing/transport, work, shopping, travel, financing, medical, and education.**
+
 ### `goal.json` shape
 
 ```jsonc
@@ -166,12 +197,12 @@ Key correction: the first pass only checked online prices (5499) and misjudged "
   "question": "Buy MacBook Neo? (office use, budget 4000)",
   "action": { "kind": "purchase_laptop", "target": "...", "reversible": false, "external": true, "moneyUsd": 563 },
   "positions": [ /* each position (allow/deny/require_human) + evidence */ ],
-  "evidence": [ /* 7 channel classes: channel/priceRMB/verified */ ],
-  "evidenceSpec": "purchase"   // string "purchase" resolves to PURCHASE_EVIDENCE_SPEC
+  "evidence": [ /* required dimensions for that domain: channel/priceRMB/verified */ ],
+  "evidenceSpec": "purchase"   // domain key: purchase / medical / education / travel / financing / work / housing
 }
 ```
 
-Test coverage: `npm test` includes `tests/loop.test.ts` (9 cases: completeness, event persistence, gate suspension, missing-evidence block, resume confirm/unconfirmed, autoConfirm, reversible-action auto-release).
+Test coverage: `npm test` includes `tests/loop.test.ts` (13 cases: domain registry, completeness, unverified-block, event persistence, gate suspension, missing-evidence block, deny-can't-execute, resume confirm/unconfirmed, autoConfirm, reversible-action auto-release).
 
 ## Quick start
 
@@ -184,7 +215,7 @@ node examples/company.ts     # an AI company: orchestrator with four workers run
                              # covering send-back-for-rework, self-produced-self-verified exposed, false-completion stop-loss
 node examples/resumable.ts   # resumable orchestration loop: external agent acts as worker, runs across calls
 node examples/arbiter.ts     # conflict arbitration: four cases walk every level of the arbitration ladder
-npm test                     # 117 tests
+npm test                     # 121 tests
 ```
 
 `demo` prints: the verdict and reasoning at each step, the postmortem, confidence calibration, and alerts.
@@ -339,6 +370,7 @@ vigil arbitrate <file.json|->  Decide when multiple agents' conclusions conflict
 vigil loop <goal.json> [--auto-confirm]   Decision loop: live events + evidence-completeness gate + confirmation gate + closed-loop execution
 vigil loop --resume <id> [--confirm]      Resume from a suspended loop (executes the closed loop after confirmation)
 vigil loop --watch <id>           Replay a loop's event stream live
+vigil domains                  List all supported decision domains (clothing/food/housing/transport, work, shopping, travel, financing, medical, education…)
 vigil decide request.json     # or read from stdin: vigil decide -
 vigil ledger                  # list all decisions
 vigil verify                  # verify hash chain + Ed25519 signature

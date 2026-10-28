@@ -1,0 +1,34 @@
+{
+  "sessionId": "medical-stent-2026-10-28",
+  "question": "亲属确诊冠心病，是否接受三甲医院建议的择期冠脉支架手术（对比药物保守治疗）；须覆盖医疗领域全维度证据",
+  "action": {
+    "kind": "medical_treatment",
+    "target": "择期冠脉支架植入术",
+    "payload": { "condition": "冠心病稳定性心绞痛", "age": 62 },
+    "reversible": false,
+    "external": true
+  },
+  "evidenceSpec": "medical",
+  "positions": [
+    {
+      "actor": "attending-doctor",
+      "conclusion": "allow",
+      "authority": 3,
+      "reason": "冠脉狭窄 75%+，药物控制不佳，指南推荐血运重建；手术为常规择期，三甲年手术量 >2000 例。"
+    },
+    {
+      "actor": "family-caution",
+      "conclusion": "require_human",
+      "authority": 1,
+      "reason": "患者 62 岁、有焦虑史，需与主刀当面确认风险与替代方案后再定。"
+    }
+  ],
+  "evidence": [
+    { "channel": "authoritative", "source": "《中国稳定性冠心病诊断与治疗指南》推荐血运重建指征", "verified": true },
+    { "channel": "expert", "source": "心内科主治：狭窄 75%+，药物控制不佳，建议支架", "verified": true },
+    { "channel": "regulatory", "source": "医院为三甲、术式与支架均具合规资质与适应症", "verified": true },
+    { "channel": "risk", "source": "手术风险：穿刺并发症 <1%、再狭窄 5–10%；保守治疗心梗风险相对更高", "verified": true },
+    { "channel": "financial", "source": "职工医保报销后自付约 1.2–1.8 万（支架集采后大幅下降）", "priceRMB": 15000, "verified": true },
+    { "channel": "alternative", "source": "替代：单纯强化药物治疗 + 生活方式干预，适用于狭窄 <70% 或高危不耐受者", "verified": true }
+  ]
+}

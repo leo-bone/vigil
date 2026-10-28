@@ -1,0 +1,36 @@
+{
+  "sessionId": "financing-loan-2026-10-28",
+  "question": "小微企业主是否办理某互联网银行 20 万经营贷（年化 7.2%，先息后本）；须覆盖融资领域全维度证据，排除推销方一面之词",
+  "action": {
+    "kind": "take_loan",
+    "target": "某互联网银行经营贷 20 万 / 12 期",
+    "payload": { "principalRMB": 200000, "apr": 0.072, "termMonths": 12 },
+    "reversible": false,
+    "external": true,
+    "moneyUsd": 50
+  },
+  "evidenceSpec": "financing",
+  "costUsd": 50,
+  "positions": [
+    {
+      "actor": "cashflow-need",
+      "conclusion": "allow",
+      "authority": 1,
+      "reason": "季节性备货缺口约 18 万，预计 6 个月内回款覆盖；利率低于信用卡分期。"
+    },
+    {
+      "actor": "risk-desk",
+      "conclusion": "require_human",
+      "authority": 2,
+      "reason": "需核实放贷牌照与隐性费用（服务费/提前还款违约金），并对比银行线下经营贷后再定。"
+    }
+  ],
+  "evidence": [
+    { "channel": "authoritative", "source": "人民银行《金融消费者权益保护实施办法》：须明示年化利率与全部费用", "verified": true },
+    { "channel": "regulatory", "source": "该机构持银保监会批准的互联网银行牌照，放贷资质合规", "verified": true },
+    { "channel": "financial", "source": "年化 7.2%、先息后本，12 期利息约 1.44 万；无显示服务费（需合同确认）", "priceRMB": 14400, "verified": true },
+    { "channel": "risk", "source": "先息后本末期还本压力大；若回款延迟有续贷/过桥风险；警惕捆绑保险与砍头息", "verified": true },
+    { "channel": "expert", "source": "独立财税顾问：对比本地银行线下经营贷（年化 4.5–5.5%）更优，建议先询价", "verified": true },
+    { "channel": "alternative", "source": "替代：本地城商行经营贷（年化 ~5%）、供应链赊购账期、股东借款", "verified": true }
+  ]
+}

@@ -69,6 +69,16 @@ export class DecisionLoop {
       logPath: join(vigilDir, `events-${this.loopId}.jsonl`),
     });
     this.#statePath = join(vigilDir, `loop-${this.loopId}.json`);
+    // 若以已有 loopId 构造（--resume 路径），恢复先前状态，使 resume 能正确判门
+    if (loopId) {
+      const prev = loadLoopState(vigilDir, loopId);
+      if (prev) {
+        this.#status = prev.status;
+        this.#lastOutcome = prev.outcome;
+        this.#decisionDetail = prev.decisionDetail;
+        this.#createdAt = prev.createdAt;
+      }
+    }
   }
 
   on(sink: (event: LoopEvent) => void): void {
@@ -112,12 +122,14 @@ export class DecisionLoop {
       this.#bus.emit('evidence_gathered', 'info', `[${evidence.channel}] ${evidence.source}${price} ${mark}`);
     }
 
-    const completeness = checkCompleteness(this.#goal.evidence, this.#goal.evidenceSpec);
+    const completeness = checkCompleteness(this.#goal.evidence, this.#goal.evidenceSpec, {
+      requireVerified: true,
+    });
     if (!completeness.complete) {
       this.#bus.emit(
         'evidence_gap',
         'alert',
-        `🔔 证据不完整：缺少渠道 ${completeness.missing.join('、')}，禁止裁决（这正是上一轮翻车的原因）`,
+        `🔔 证据不完整：缺少证据维度 ${completeness.missing.join('、')}，或必备维度未核验，禁止裁决（这正是上一轮翻车的原因）`,
         { missing: completeness.missing },
       );
       this.#status = 'blocked';
@@ -170,6 +182,23 @@ export class DecisionLoop {
   /** 从挂起恢复：confirmed=true 才解除闸门并闭环执行 */
   async resume(confirmed: boolean): Promise<DecisionLoopState> {
     this.#bus.emit('resumed', 'info', `恢复循环（确认=${confirmed}）`);
+    // 已否决的循环不可能被"确认执行"——这是硬约束，防止 deny 被误放行成真实动作
+    if (this.#lastOutcome === 'deny') {
+      this.#bus.emit(
+        'paused',
+        'alert',
+        '该循环仲裁结论为 deny（已否决），无法确认执行；如需重新评估请新建循环',
+      );
+      this.#status = 'completed';
+      this.#saveState();
+      return this.#buildState();
+    }
+    // 只有挂在确认闸门上的循环才允许恢复执行，其余状态（completed / blocked）一律拒绝
+    if (this.#status !== 'awaiting_confirmation') {
+      this.#bus.emit('paused', 'alert', `循环当前状态为 ${this.#status}，无需/无法恢复执行`);
+      this.#saveState();
+      return this.#buildState();
+    }
     if (!confirmed) {
       this.#bus.emit('paused', 'alert', '未获授权，循环保持挂起，不执行任何真实动作');
       this.#status = 'awaiting_confirmation';

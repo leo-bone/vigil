@@ -24,7 +24,7 @@ import { arbitrate } from './pipeline/arbiter.ts';
 import type { Position } from './pipeline/arbiter.ts';
 import { join } from 'node:path';
 import { DecisionLoop, loadLoopState, type LoopGoal } from './loop/decisionLoop.ts';
-import { PURCHASE_EVIDENCE_SPEC, type EvidenceSpec } from './loop/evidence.ts';
+import { resolveDomainSpec, listDomains, type EvidenceSpec } from './loop/evidence.ts';
 import { loadEventLog, type LoopEvent } from './loop/events.ts';
 import { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
 import { KILL_FILE, engageKill, readKillState, releaseKill } from './policy/killswitch.ts';
@@ -246,6 +246,7 @@ vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转�
   vigil loop <goal.json> [--auto-confirm]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行
   vigil loop --resume <id> [--confirm]      从挂起恢复（确认后闭环执行）
   vigil loop --watch <id>          实时回看某循环的事件流
+  vigil domains                  列出所有支持的决策领域（衣食住行/工作/购物/旅行/融资/医疗/教育…）
   vigil decide <文件.json|->     请求裁决，结果写入账本
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
   vigil hook claude [--shadow]  作为 Claude Code 的 PreToolUse 钩子运行
@@ -959,6 +960,12 @@ async function main(): Promise<void> {
         if (!id) throw new Error('用法：vigil loop --resume <loopId> [--confirm]');
         const state = loadLoopState(vigilDir, id);
         if (!state) throw new Error(`找不到循环状态：${id}`);
+        if (state.status !== 'awaiting_confirmation') {
+          process.stdout.write(
+            `该循环状态为 ${state.status}（${state.outcome ?? '—'}），无需/无法恢复执行。\n`,
+          );
+          return;
+        }
         const loop = new DecisionLoop(kernel, state.goal, vigilDir, id);
         loop.on(sink);
         const final = await loop.resume(confirmFlag);
@@ -972,12 +979,11 @@ async function main(): Promise<void> {
       };
       let spec: EvidenceSpec;
       if (typeof parsed.evidenceSpec === 'string') {
-        if (parsed.evidenceSpec === 'purchase') spec = PURCHASE_EVIDENCE_SPEC;
-        else throw new Error(`未知证据规格：${parsed.evidenceSpec}（支持 purchase）`);
+        spec = resolveDomainSpec(parsed.evidenceSpec);
       } else if (parsed.evidenceSpec) {
         spec = parsed.evidenceSpec;
       } else {
-        spec = PURCHASE_EVIDENCE_SPEC;
+        spec = resolveDomainSpec('purchase');
       }
       const goal: LoopGoal = { ...parsed, evidenceSpec: spec, autoConfirm };
       const loop = new DecisionLoop(kernel, goal, vigilDir);
@@ -987,6 +993,19 @@ async function main(): Promise<void> {
       process.stdout.write(`循环状态：${final.status}\n`);
       if (final.status === 'awaiting_confirmation') {
         process.stdout.write(`⏸ 已挂起等待你确认。恢复：vigil loop --resume ${loop.loopId} --confirm\n`);
+      }
+      return;
+    }
+
+    case 'domains': {
+      const domains = listDomains();
+      process.stdout.write(`Vigil 决策领域注册表（覆盖人一生的决策；想加新领域往 DECISION_DOMAINS 加一项即可）\n`);
+      process.stdout.write(`${'领域'.padEnd(12)}${'key'.padEnd(14)}必备证据维度\n`);
+      for (const d of domains) {
+        process.stdout.write(`${d.label.padEnd(12)}${d.key.padEnd(14)}${d.required.join(' / ')}\n`);
+        if (d.excludeHint?.length) {
+          process.stdout.write(`${''.padEnd(12)}${''.padEnd(14)}（排除：${d.excludeHint.join(' / ')}）\n`);
+        }
       }
       return;
     }

@@ -1,0 +1,36 @@
+{
+  "sessionId": "buy-macbook-neo-2026-10-28",
+  "question": "是否购买 MacBook Neo（办公用途，预算红线 4000 元，旧机不卖）；须覆盖全维度证据；仍可对比 MacBook Air M5 16GB",
+  "action": {
+    "kind": "purchase_laptop",
+    "target": "MacBook Neo 13-inch A18 Pro 8GB 256GB",
+    "payload": { "budgetRMB": 4000, "useCase": "office", "tradeIn": false },
+    "reversible": false,
+    "external": true,
+    "moneyUsd": 563
+  },
+  "evidenceSpec": "purchase",
+  "costUsd": 563,
+  "positions": [
+    {
+      "actor": "user-desire",
+      "conclusion": "allow",
+      "authority": 1,
+      "reason": "用途为办公（文档/表格/浏览器/视频），A18 Pro + 8GB 足够；周五计划到店体验。"
+    },
+    {
+      "actor": "budget-guard",
+      "conclusion": "allow",
+      "authority": 2,
+      "reason": "国补15% 使 4599→3909、教育 3999 起、线下国补+学生补贴 ~4030。补贴后实付压线或低于 4000 预算红线，预算约束满足。"
+    }
+  ],
+  "evidence": [
+    { "channel": "authoritative", "source": "Apple 中国官网 256G 起售 4599 / 教育 3999", "priceRMB": 4599, "verified": true },
+    { "channel": "market", "source": "天猫官方旗舰店常卖 4599；线下授权店国补+学生补贴 ~4030", "priceRMB": 4030, "verified": true },
+    { "channel": "regulatory", "source": "国补15%：4599→3909（光明网）；学生补贴可叠国补/教育", "priceRMB": 3909, "verified": true },
+    { "channel": "financial", "source": "以旧换新三重叠加低至 2899–3369（京东/ChinaDaily）", "priceRMB": 2899, "verified": true },
+    { "channel": "alternative", "source": "对比 MacBook Air M5 16GB（内存 16/24GB，规格更强但价更高）", "verified": true },
+    { "channel": "peer", "source": "用户/社群反馈：A18 Pro 办公够用、续航与保值尚可", "verified": true }
+  ]
+}

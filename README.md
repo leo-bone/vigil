@@ -120,16 +120,45 @@ Vigil 只向判断模型发送类型化问题（boolean / choice / score），�
 
 1. **实时知道** —— 循环的每一步都发射事件（目标 / 证据 / 裁决 / 闸门 / 执行），边跑边打印，并落盘成事件流，对话关了也能 `vigil loop --watch <id>` 回看。
 2. **按逻辑自动执行 + 重要节点让你确认后闭环** —— 对外且不可逆（花钱）的动作，必须经过人工确认闸门（`--resume <id> --confirm`）才真正执行；可逆/非对外的动作自动放行。
-3. **证据必须真实完整** —— 决策前必须把该类决策要求的所有渠道类都跑到（官方 / 电商 / 教育 / 国补 / 学生补贴 / 线下 / 以旧换新）；**缺一类即禁止裁决**，从根上堵住"只看线上价就误判超预算"的翻车。
+3. **证据必须真实完整** —— 决策前必须把该领域要求的**证据维度**全跑到（权威 / 市场 / 监管 / 财务 / 风险 / 专家 / 替代 / 口碑）；**缺一类即禁止裁决**，从根上堵住"只看线上价就误判超预算"的翻车。
 
 ### 四个支柱
 
 | 支柱 | 实现 | 解决什么 |
 |---|---|---|
 | 实时事件 | `LoopEventBus`，每阶段 `emit` 可见事件并落盘 `events-<id>.jsonl` | 不再沉默地分析，每一步你都看得见 |
-| 证据完整性闸门 | `checkCompleteness`，按决策类型枚举渠道类，缺一类即 `blocked` | 证据不全就裁决 = 瞎决策，直接封死 |
+| 证据完整性闸门 | `checkCompleteness`，按决策领域枚举必备证据维度，缺一类即 `blocked`（且必备维度必须已核验） | 证据不全/未核验就裁决 = 瞎决策，直接封死 |
 | 确认闸门（HITL） | `isGatedAction = external && !reversible`，命中则挂起 `awaiting_confirmation` | 花钱动作 100% 人确认才执行（对标 Operator 金融交易护栏） |
 | 可暂停 / 可续跑 | 状态落盘 `loop-<id>.json`，`resume(confirmed)` 恢复 | 等确认、等降价时能挂起，不丢进度 |
+
+### 决策领域注册表（覆盖人一生，不止购物）
+
+证据闸门之所以能通用，是因为**证据维度是跨领域通用词汇**，每个生活领域从中挑出"本决策必备"的子集：
+
+| 维度 | 含义 |
+|---|---|
+| authoritative | 官方/权威来源：政策、法规、官方定价、官方指南 |
+| market | 市场/商业：价格、供应、竞品、行情、比价 |
+| peer | 用户/社群真实经验：口碑、踩坑、长期持有反馈 |
+| expert | 专业人士/专家：医生、律师、行业人士、顾问 |
+| regulatory | 合规/政策/资质：牌照、认证、补贴、入学/入境、法律风险 |
+| financial | 成本/财务影响：总拥有成本、隐性费用、现金流、利率、报销 |
+| risk | 风险/安全：健康、安全、退出成本、爆雷、诈骗、副作用 |
+| alternative | 替代方案对比：更好 / 更便宜 / 更稳 / 更合规的选择 |
+
+已注册领域（`vigil domains` 可查看）：
+
+| 领域 | key | 必备维度 | 排除 |
+|---|---|---|---|
+| 购物消费 | purchase | authoritative / market / regulatory / financial / alternative / peer | — |
+| 医疗健康 | medical | authoritative / expert / regulatory / risk / financial / alternative | market（商业推销不算证据） |
+| 教育升学 | education | authoritative / expert / regulatory / financial / alternative / risk | — |
+| 旅行出行 | travel | authoritative / market / regulatory / risk / financial / alternative | — |
+| 融资理财 | financing | authoritative / regulatory / financial / risk / expert / alternative | market（推销方一面之词不算证据） |
+| 求职职业 | work | authoritative / expert / financial / risk / alternative / regulatory | — |
+| 居住置业 | housing | authoritative / market / regulatory / financial / risk / alternative | — |
+
+**想加新领域（保险 / 婚恋 / 移民 / 养老……），往 `DECISION_DOMAINS` 加一项即可，证据闸门自动生效。**
 
 ### 状态机
 
@@ -143,9 +172,9 @@ goal_received → plan → evidence_gathered → [evidence_complete | evidence_g
 ### 实跑：买 MacBook Neo（预算 4000，旧机不卖）
 
 ```bash
-# 1) 起一个循环，加载全渠道证据（见 decisions/neo-goal.json）
-node src/cli.ts loop decisions/neo-goal.json
-# 打印：7 条渠道证据（官方/电商/教育/国补/学生补贴/线下/以旧换新，全部已核验）
+# 1) 起一个循环，加载全维度证据（见 examples/goal-neo-purchase.json）
+node src/cli.ts loop examples/goal-neo-purchase.json
+# 打印：6 个证据维度（权威/市场/监管/财务/替代/口碑，全部已核验）
 #       → 证据完整放行 → 裁决 require_human → ⏸ 确认闸门挂起（awaiting_confirmation）
 
 # 2) 你看过事件流、确认无误后，放行闭环
@@ -158,6 +187,8 @@ node src/cli.ts loop --watch lp_xxxx
 
 关键纠正：首轮只查线上价（5499）一度误判"超预算否决"。补全国补 15%（4599→3909）、教育 3999、学生补贴 + 线下 ~4030 之后，**补贴后实付压线或低于 4000，预算约束满足** —— 这正是"证据完整"闸门存在的意义。
 
+同一套机制已用**非购买领域**验证：`examples/goal-medical.json`（冠心病择期支架手术，6 维度全核验 → 闸门挂起 → 确认闭环）、`examples/goal-financing.json`（20 万经营贷，覆盖融资领域全维度且排除"推销方一面之词" → 闸门挂起 → 确认闭环）。**决策系统不是"买电脑专用"，而是覆盖衣食住行、工作、购物、旅行、融资、医疗、教育的通用框架。**
+
 ### `goal.json` 形态
 
 ```jsonc
@@ -166,12 +197,12 @@ node src/cli.ts loop --watch lp_xxxx
   "question": "是否购买 MacBook Neo（办公，预算 4000）",
   "action": { "kind": "purchase_laptop", "target": "...", "reversible": false, "external": true, "moneyUsd": 563 },
   "positions": [ /* 各立场（allow/deny/require_human）+ 证据 */ ],
-  "evidence": [ /* 7 类渠道，channel/priceRMB/verified */ ],
-  "evidenceSpec": "purchase"   // 字符串 "purchase" 解析为 PURCHASE_EVIDENCE_SPEC
+  "evidence": [ /* 该领域必备维度，channel/priceRMB/verified */ ],
+  "evidenceSpec": "purchase"   // 领域 key：purchase / medical / education / travel / financing / work / housing
 }
 ```
 
-测试覆盖：`npm test` 已含 `tests/loop.test.ts`（9 个用例：完整性、事件落盘、闸门挂起、缺证据阻塞、resume 确认/未确认、autoConfirm、可逆动作自动放行）。
+测试覆盖：`npm test` 已含 `tests/loop.test.ts`（13 个用例：领域注册表、完整性、未核验阻塞、事件落盘、闸门挂起、缺证据阻塞、deny 不可被执行、resume 确认/未确认、autoConfirm、可逆动作自动放行）。
 
 ## 快速开始
 
@@ -184,7 +215,7 @@ node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
 node examples/resumable.ts   # 可续跑统筹循环：外部 agent 扮演工人，跨调用跑完
 node examples/arbiter.ts     # 冲突仲裁：四个案例走完仲裁阶梯的每一级
-npm test                     # 117 个测试
+npm test                     # 121 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -347,6 +378,7 @@ vigil arbitrate <文件.json|->  多 agent 结论冲突时定夺
 vigil loop <goal.json> [--auto-confirm]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行
 vigil loop --resume <id> [--confirm]      从挂起恢复（确认后闭环执行）
 vigil loop --watch <id>          实时回看某循环的事件流
+vigil domains                  列出所有支持的决策领域（衣食住行/工作/购物/旅行/融资/医疗/教育…）
 vigil decide request.json     # 或从 stdin 读：vigil decide -
 vigil ledger                  # 列出所有决策
 vigil verify                  # 校验哈希链 + Ed25519 签名
