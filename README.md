@@ -130,6 +130,9 @@ Vigil 只向判断模型发送类型化问题（boolean / choice / score），�
 | 证据完整性闸门 | `checkCompleteness`，按决策领域枚举必备证据维度，缺一类即 `blocked`（且必备维度必须已核验） | 证据不全/未核验就裁决 = 瞎决策，直接封死 |
 | 确认闸门（HITL） | `isGatedAction = external && !reversible`，命中则挂起 `awaiting_confirmation` | 花钱动作 100% 人确认才执行（对标 Operator 金融交易护栏） |
 | 可暂停 / 可续跑 | 状态落盘 `loop-<id>.json`，`resume(confirmed)` 恢复 | 等确认、等降价时能挂起，不丢进度 |
+| 推送通道（拉→推） | `LoopEventBus` 在 emit 同时把事件推到企微 / 邮件 / 通用 webhook（`Notifier`） | 不再只能 `vigil loop --watch` 回看：每次决策主动推到你手机 |
+| 真实执行适配器 | `ActionExecutor`：默认 `DryRunExecutor`，配置 `VIGIL_EXECUTOR_WEBHOOK` 后真实触发你自己的下单 / 开户端点 | 确认闸门放行后才落地，deny / 未确认绝不执行 |
+| 证据驱动裁决（Reasoning） | `buildBrief()`：把已核验的实时行情转成透明、可复核的配置方案（`DecisionBrief`），喂回仲裁与执行 | 根治"证据只打印不进决策"——裁决真正由实时数据驱动 |
 
 ### 决策领域注册表（覆盖人一生，不止购物）
 
@@ -174,24 +177,81 @@ goal_received → plan → evidence_gathered → [evidence_complete | evidence_g
 
 证据完整闸门要求"真实完整"。但证据不该永远是**人手填进 goal.json** —— 系统应当能自己抓取能机读的数据，抓不到的维度则**诚实标记未核验、交闸门拦截**，绝不编造"已核验"。
 
-- `src/loop/evidenceProvider.ts`：定义 `EvidenceSource` 接口与 `gatherEvidence` 编排器；`FrankfurterFxSource`（ECB 实时汇率，无需 key）等真源，以及可注入 `searchFn` 的 `SearchSource`（无后端时 `canServe=false`，相关维度保持未核验）。
-- `vigil evidence fetch <领域> "<问题>"`：实时采集该领域必备维度的证据，输出带 source URL + 抓取时间戳的 JSON。
-- `vigil loop <goal.json> --gather`：证据为空或显式 `--gather` 时，先用实时源补抓（已核验的沿用既有、只补缺失/未核验项）再跑循环。
+`src/loop/evidenceProvider.ts` 定义 `EvidenceSource` 接口与 `gatherEvidence` 编排器。**同一规范维度可挂多路实时源**（如 `invest/financial` 同时跑汇率、黄金、白银、国债、股指、加密），只要有一路成功核验，该维度即视为已覆盖。已内置的公开 API 真源（均无需 key）：
+
+| 源 | 维度 | 数据 | 沙箱可达 |
+|---|---|---|---|
+| `FrankfurterFxSource` / `ErApiFxSource` | financial | USD/CNY 实时汇率（ECB） | ✓ |
+| `GoldSource` / `SilverSource` | financial | 现货黄金 XAU / 白银 XAG（gold-api.com） | ✓ |
+| `TreasuryYieldSource` | financial | 美国 10 年期国债收益率（AlphaVantage，可用 `VIGIL_AV_KEY` 提额） | ✓ |
+| `CryptoSource` | financial | BTC / ETH 行情（CoinGecko） | 公网可达，沙箱出网拦截 |
+| `StockIndexSource` | financial | S&P 500 等股指（Stooq CSV） | 公网可达，沙箱出网拦截 |
+| `SearchSource` | 非机读维度 | 可注入 `searchFn`（WebSearch 后端） | 取决于是否接后端 |
+
+- `vigil evidence fetch <领域> "<问题>" [--extended]`：实时采集该领域必备维度证据，输出带 source URL + 抓取时间戳的 JSON；`--extended` 纳入加密 / 股指等公网源。
+- `vigil loop <goal.json> --gather [--extended]`：证据为空或显式 `--gather` 时，先用实时源补抓（已核验的整维度沿用既有、不重复抓）再跑循环。
 
 ```bash
-# 实时抓取 invest 领域证据（汇率真抓，其余维度诚实标记未核验）
-node src/cli.ts evidence fetch invest "配置20万美金全球分散"
-# → 已实时核验：financial（USD/CNY=6.6675，Frankfurter/ECB）
+# 实时抓取 invest 领域证据（汇率/黄金/白银/国债 真抓，加密/股指沙箱不可达则诚实降级）
+node src/cli.ts evidence fetch invest "配置20万美金全球分散" --extended
+# → 已实时核验：financial（USD/CNY=6.6675 / 黄金 $4045 / 白银 $53.9 / 10Y 国债 4.99%）
 # → 未核验：authoritative / regulatory / risk / expert / alternative（需人工/搜索补充）
 
-# 用空证据骨架跑 --gather：live 抓到汇率，但其余 5 维未核验 → 闸门直接 blocked（不假决策）
+# 用空证据骨架跑 --gather：live 抓到 financial，但其余 5 维未核验 → 闸门直接 blocked（不假决策）
 node src/cli.ts loop examples/goal-invest-200k-skeleton.json --gather
 
-# 用全维度真实核验的目标文件跑完整闭环（含实时 FX + WebSearch 来源）
-node src/cli.ts loop examples/goal-invest-200k-live.json
+# 用全维度真实核验的目标文件跑完整闭环（financial 实时抓 + 其余维度已核验）
+node src/cli.ts loop examples/goal-invest-200k-demo.json --gather --extended
 ```
 
-**设计底线**：能机读的（汇率）实时真抓、附来源与时间戳；抓不到的维度绝不假核验，由完整性闸门拦截，强制人工/搜索补充。
+**设计底线**：能机读的实时真抓、附来源与时间戳；抓不到的维度绝不假核验，由完整性闸门拦截，强制人工/搜索补充。
+
+### 推送通道（Notifier）：把"实时知道"从拉变推
+
+`LoopEventBus` 在每次 emit（目标 / 证据 / 裁决 / 闸门 / 执行……）的同时，会把事件**主动推送**到你配置的通道，不再只能 `vigil loop --watch` 事后回看：
+
+- **企业微信**：`VIGIL_NOTIFY_WECOM` 配群机器人 webhook，把事件文本推到群里。
+- **邮件**：`VIGIL_NOTIFY_EMAIL_API` + `VIGIL_NOTIFY_EMAIL_FROM/TO`（Resend / Mailgun / SendGrid 形态）发事件邮件。
+- **通用 webhook**：`VIGIL_NOTIFY_WEBHOOK` 把整个事件 JSON POST 出去（飞书 / Slack / Discord / Zapier / Make 等任意能收 JSON 的服务）。
+
+未配置任何通道时，总线只落盘、不推送（**不假装已通知**）；推送失败只记录、绝不因通道抖动卡死决策循环。
+
+### 真实执行适配器（Executor）：确认闸门放行后才落地
+
+闭环的"执行"由 `ActionExecutor` 负责，默认是 `DryRunExecutor`（只打印执行清单、不发生任何真实副作用）。配置 `VIGIL_EXECUTOR_WEBHOOK` 后，已确认的动作会被 **POST 到你自己的端点**（券商 / 开户系统 / 支付 / Zapier），由该端点完成真实下单或开户 —— **Vigil 只负责"确认后触发"，不持有任何资金凭证**。
+
+> 关键护栏：执行器只在**确认闸门放行之后**被调用（`deny` 永远到不了这里，未确认也到不了）。所以"真实下单 / 开户"的安全性来自闸门，而不是执行器本身。
+
+```bash
+# 配置真实执行端点 + 推送通道后，还原真实的"确认即下单"
+VIGIL_EXECUTOR_WEBHOOK=https://your-broker.example.com/vigil-execute \
+VIGIL_NOTIFY_WEBHOOK=https://hooks.example.com/vigil \
+  node src/cli.ts loop examples/goal-invest-200k-demo.json --gather
+# → 证据齐 → 仲裁 → ⏸ 确认闸门挂起（每个事件已推送到你的 webhook）
+
+vigil loop --resume lp_xxxx --confirm
+# → 确认后：解除闸门 → 触发 WebhookExecutor POST 你的端点（payload 含 decisionBrief 配置方案）→ 拿到外部订单号 → completed
+```
+
+### 证据驱动裁决（Reasoning）：让实时数据真的参与决策
+
+之前的致命短板：循环把实时采集到的行情（黄金 / 国债 / FX）**只打印、不进裁决**，决策实际由 goal 里预写的 `positions` 立场决定 —— 等于没在决策。
+
+`src/loop/reasoning.ts` 的 `buildBrief()` 在完整性闸门放行后、仲裁之前运行，把已核验的金融证据按**透明规则**转成一份可复核的配置方案（`DecisionBrief`）：
+
+- `invest` / `financing` 领域：实时信号 → 具体仓位（债券随 10Y 收益率在 15/25/35% 三档浮动、权益取到实时标普给 30% 否则降到 20% 转现金、黄金 15% / 白银 5% 对冲、比特币仅取到实时价才给 5% 卫星仓、现金补足到 100%），每一条都引用实时数值 + 时间戳。
+- 非金融领域（医疗 / 教育 / 购物…）：不编造配置，只输出「已核验证据摘要」作为裁决依据。
+- **诚实边界**：抓不到的行情，对应仓位下调 / 移除并明确警示、置信度降级（实时信号 5/6→high、3-4→medium、<3→low），绝不填数字假装算过。
+
+`DecisionBrief` 随后被 emit 为 `reasoning` 事件（实时可见）、透传进仲裁账本（`extras.decisionBrief`）、写入循环状态、并在确认后随执行上下文发给券商端点（`payload.decisionBrief`）。
+
+```bash
+# 实跑会看到 reasoning 事件里的真实配置（数据来自上面的实时采集）
+node src/cli.ts loop examples/goal-invest-200k-demo.json --gather --extended
+# [reasoning] 证据驱动分析：实时信号：USD/CNY=6.67 ｜ 美10Y=4.99%
+# [reasoning] 建议配置（合计 100%）：美国10年期国债 35% / 标普500指数 20% / 现货黄金 15% / 现货白银 5% / 现金(美元) 25%
+# [reasoning] 置信度：low   ⚠ 未取到实时标普/加密行情，仓位已下调（沙箱内部分源不可达，公网可正常抓取）
+```
 
 ### 实跑：买 MacBook Neo（预算 4000，旧机不卖）
 
@@ -221,12 +281,12 @@ node src/cli.ts loop --watch lp_xxxx
   "question": "是否购买 MacBook Neo（办公，预算 4000）",
   "action": { "kind": "purchase_laptop", "target": "...", "reversible": false, "external": true, "moneyUsd": 563 },
   "positions": [ /* 各立场（allow/deny/require_human）+ 证据 */ ],
-  "evidence": [ /* 该领域必备维度，channel/priceRMB/verified */ ],
+  "evidence": [ /* 该领域必备维度；每条含 dimension(规范维度,闸门据此判定)/channel(来源标签)/source/verified；无 dimension 时回退到 channel */ ],
   "evidenceSpec": "purchase"   // 领域 key：purchase / medical / education / travel / financing / invest / work / housing
 }
 ```
 
-测试覆盖：`npm test` 已含 `tests/loop.test.ts`（13 个用例：领域注册表、完整性、未核验阻塞、事件落盘、闸门挂起、缺证据阻塞、deny 不可被执行、resume 确认/未确认、autoConfirm、可逆动作自动放行）。
+测试覆盖：`npm test` 已含 `tests/loop.test.ts`（决策循环 / 领域注册表 / 完整性 / 未核验阻塞 / 事件落盘 / 闸门挂起 / deny 不可被执行 / resume 确认·未确认 / autoConfirm / 可逆动作自动放行）、`tests/evidenceProvider.test.ts`（实时源与采集编排）、`tests/reasoning.test.ts`（证据驱动裁决：债券随 10Y 浮动、缺失行情诚实降级、置信度分级、非金融领域不编造配置）与 `tests/decisionSystem.test.ts`（真实数据源多路采集、推送通道企微/邮件/webhook、执行适配器 dry-run/webhook、确认闸门放行后才触发、brief 进入循环状态并随执行 payload 传递的集成测试）。
 
 ## 快速开始
 

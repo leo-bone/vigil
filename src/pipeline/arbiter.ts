@@ -2,6 +2,7 @@ import type { Kernel } from '../kernel.ts';
 import type { ActionSpec, AuthorityLevel, Evidence, Verdict } from '../types.ts';
 import { grantedAuthority } from '../policy/rules.ts';
 import type { PolicyContext } from '../policy/rules.ts';
+import type { DecisionBrief } from '../loop/reasoning.ts';
 
 /**
  * 冲突仲裁（Arbiter）。
@@ -60,6 +61,8 @@ export interface ArbitrationInput {
   action: ActionSpec;
   /** 强制升级，跳过模型排序 */
   forceEscalation?: boolean;
+  /** 证据驱动裁决得出的配置简报（invest/financing 领域含具体仓位），透传到账本与执行 */
+  brief?: DecisionBrief;
 }
 
 export interface ArbitrationResult {
@@ -257,6 +260,7 @@ export async function arbitrate(kernel: Kernel, input: ArbitrationInput): Promis
           authority: position.authority,
         })),
       },
+      decisionBrief: input.brief ?? null,
     },
   });
 

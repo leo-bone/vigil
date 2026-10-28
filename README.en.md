@@ -130,6 +130,8 @@ The original design put "money" and "irreversible" on the same level. We split t
 | Evidence-completeness gate | `checkCompleteness`, enumerates required evidence dimensions by domain; missing one (or unverified) → `blocked` | Deciding with incomplete/unverified evidence = blind decision, hard-blocked |
 | Confirmation gate (HITL) | `isGatedAction = external && !reversible`, on hit → suspend `awaiting_confirmation` | Money actions 100% human-confirmed before execution (mirrors Operator's financial-transaction guardrails) |
 | Pausable / resumable | state persisted to `loop-<id>.json`, `resume(confirmed)` restores | Can suspend while awaiting confirmation or price drops, without losing progress |
+| Push channel (pull→push) | `LoopEventBus` also pushes every event to WeCom / email / generic webhook (`Notifier`) on emit | No longer only `vigil loop --watch` replay: each decision is pushed to your phone proactively |
+| Real execution adapter | `ActionExecutor`: `DryRunExecutor` by default; set `VIGIL_EXECUTOR_WEBHOOK` to truly trigger your own order/account-open endpoint | Lands only after the confirmation gate releases; deny / unconfirmed never executes |
 
 ### Decision-domain registry (covers a whole life, not just shopping)
 
@@ -174,24 +176,61 @@ goal_received → plan → evidence_gathered → [evidence_complete | evidence_g
 
 The completeness gate demands "real and complete" evidence. But evidence shouldn't be **hand-typed into goal.json forever** — the system should fetch machine-readable data itself, and for dimensions it can't fetch, **honestly mark them unverified and let the gate block**, never faking a "verified" stamp.
 
-- `src/loop/evidenceProvider.ts`: defines the `EvidenceSource` interface and `gatherEvidence` orchestrator; real sources like `FrankfurterFxSource` (ECB live FX, no key), plus an injectable `SearchSource` (`canServe=false` when no backend, leaving those dimensions unverified).
-- `vigil evidence fetch <domain> "<question>"`: gathers the domain's required-dimension evidence live, emitting JSON with source URLs + fetch timestamps.
-- `vigil loop <goal.json> --gather`: when evidence is empty or `--gather` is set, fills the gaps with live sources (keeps existing verified evidence) before running.
+`src/loop/evidenceProvider.ts` defines the `EvidenceSource` interface and `gatherEvidence` orchestrator. **Multiple live sources can hang on the same dimension** (e.g. `invest/financial` runs FX, gold, silver, treasury, index, crypto simultaneously); the dimension counts as covered once any one source verifies. Built-in public-API sources (all keyless):
+
+| Source | Dimension | Data | Reachable in sandbox |
+|---|---|---|---|
+| `FrankfurterFxSource` / `ErApiFxSource` | financial | USD/CNY live rate (ECB) | ✓ |
+| `GoldSource` / `SilverSource` | financial | Spot gold XAU / silver XAG (gold-api.com) | ✓ |
+| `TreasuryYieldSource` | financial | US 10Y treasury yield (AlphaVantage; `VIGIL_AV_KEY` raises quota) | ✓ |
+| `CryptoSource` | financial | BTC / ETH quotes (CoinGecko) | public-net reachable; sandbox egress blocks |
+| `StockIndexSource` | financial | S&P 500 etc. (Stooq CSV) | public-net reachable; sandbox egress blocks |
+| `SearchSource` | non-machine dims | injectable `searchFn` (WebSearch backend) | depends on backend |
+
+- `vigil evidence fetch <domain> "<question>" [--extended]`: live-gathers the domain's required-dimension evidence, emitting JSON with source URL + fetch timestamp; `--extended` includes crypto / index public sources.
+- `vigil loop <goal.json> --gather [--extended]`: when evidence is empty or `--gather` is set, fills gaps with live sources (keeps whole-dimension verified evidence) before running.
 
 ```bash
-# Live-fetch invest evidence (FX really fetched; other dims honestly unverified)
-node src/cli.ts evidence fetch invest "allocate 200k USD globally"
-# → live-verified: financial (USD/CNY=6.6675, Frankfurter/ECB)
+# Live-fetch invest evidence (FX/gold/silver/treasury really fetched; crypto/index degrade honestly if blocked)
+node src/cli.ts evidence fetch invest "allocate 200k USD globally" --extended
+# → live-verified: financial (USD/CNY=6.6675 / gold $4045 / silver $53.9 / 10Y 4.99%)
 # → unverified: authoritative / regulatory / risk / expert / alternative (need human/search)
 
 # Run --gather on an empty-evidence skeleton: FX fetched live, but 5 dims unverified → gate blocks (no fake decision)
 node src/cli.ts loop examples/goal-invest-200k-skeleton.json --gather
 
-# Full closed loop with all-dimensions-real goal (live FX + WebSearch-sourced)
-node src/cli.ts loop examples/goal-invest-200k-live.json
+# Full closed loop with all-dimensions-real goal (financial live + others verified)
+node src/cli.ts loop examples/goal-invest-200k-demo.json --gather --extended
 ```
 
-**Design floor**: machine-readable data (FX) is fetched live with source + timestamp; unfetchable dimensions are never faked-verified — the completeness gate blocks and forces human/search input.
+**Design floor**: machine-readable data is fetched live with source + timestamp; unfetchable dimensions are never faked-verified — the completeness gate blocks and forces human/search input.
+
+### Push channel (Notifier): from pull to push
+
+`LoopEventBus` also **proactively pushes** every event (goal / evidence / decision / gate / execute …) to your configured channel on each emit — no longer only replayable via `vigil loop --watch`:
+
+- **WeCom**: `VIGIL_NOTIFY_WECOM` group-robot webhook pushes event text to the group.
+- **Email**: `VIGIL_NOTIFY_EMAIL_API` + `VIGIL_NOTIFY_EMAIL_FROM/TO` (Resend / Mailgun / SendGrid shape) sends event email.
+- **Generic webhook**: `VIGIL_NOTIFY_WEBHOOK` POSTs the full event JSON (Feishu / Slack / Discord / Zapier / Make, any JSON-receiving service).
+
+With no channel configured, the bus only persists (never pretends to have notified); push failures are logged only and never stall the decision loop.
+
+### Real execution adapter (Executor): lands only after the confirmation gate releases
+
+Loop "execution" is handled by an `ActionExecutor`; by default `DryRunExecutor` only prints the plan and causes no real side effects. Once `VIGIL_EXECUTOR_WEBHOOK` is set, a confirmed action is **POSTed to your own endpoint** (broker / account-opening / payment / Zapier), which performs the real order or account opening — **Vigil only "triggers after confirmation" and holds no fund credentials**.
+
+> Key guardrail: the executor is only invoked **after the confirmation gate releases** (`deny` never reaches it, nor does an unconfirmed loop). So the safety of "real order / account opening" comes from the gate, not the executor.
+
+```bash
+# Configure a real execution endpoint + push channel, replay the real "confirm-to-order" flow
+VIGIL_EXECUTOR_WEBHOOK=https://your-broker.example.com/vigil-execute \
+VIGIL_NOTIFY_WEBHOOK=https://hooks.example.com/vigil \
+  node src/cli.ts loop examples/goal-invest-200k-demo.json --gather
+# → evidence ready → arbitrate → ⏸ confirmation gate suspended (every event already pushed to your webhook)
+
+vigil loop --resume lp_xxxx --confirm
+# → on confirm: gate lifts → WebhookExecutor POSTs your endpoint → returns external order id → completed
+```
 
 ### Real run: buying a MacBook Neo (budget 4000, keep the old machine)
 

@@ -5,6 +5,10 @@ import type { Kernel } from '../kernel.ts';
 import { arbitrate, type Position } from '../pipeline/arbiter.ts';
 import { LoopEventBus, type LoopEvent } from './events.ts';
 import { checkCompleteness, type ChannelEvidence, type EvidenceSpec } from './evidence.ts';
+import type { Notifier } from './notifier.ts';
+import type { ActionExecutor } from './executor.ts';
+import { DryRunExecutor } from './executor.ts';
+import { buildBrief, type DecisionBrief } from './reasoning.ts';
 
 /**
  * 决策循环状态机。
@@ -24,6 +28,8 @@ export interface LoopGoal {
   positions: Position[];
   evidence: ChannelEvidence[];
   evidenceSpec: EvidenceSpec;
+  /** 决策领域 key（invest / financing / purchase …），供证据驱动裁决选择分配逻辑 */
+  domain?: string;
   costUsd?: number;
   /** 闭环执行清单（dry-run 输出）；缺省时打印通用三步 */
   plan?: string[];
@@ -38,6 +44,8 @@ export interface DecisionLoopState {
   status: LoopStatus;
   outcome?: string;
   decisionDetail?: string;
+  /** 证据驱动裁决得出的配置简报（invest/financing 含具体仓位） */
+  brief?: DecisionBrief;
   createdAt: string;
   updatedAt: string;
 }
@@ -61,15 +69,26 @@ export class DecisionLoop {
   #createdAt: string;
   #lastOutcome: string | undefined;
   #decisionDetail: string | undefined;
+  #brief: DecisionBrief | undefined;
+  #executor: ActionExecutor;
 
-  constructor(kernel: Kernel, goal: LoopGoal, vigilDir: string, loopId?: string) {
+  constructor(
+    kernel: Kernel,
+    goal: LoopGoal,
+    vigilDir: string,
+    loopId?: string,
+    notifier?: Notifier,
+    executor?: ActionExecutor,
+  ) {
     this.#kernel = kernel;
     this.#goal = goal;
     this.loopId = loopId ?? makeLoopId();
     this.#createdAt = new Date().toISOString();
     this.#bus = new LoopEventBus(this.loopId, {
       logPath: join(vigilDir, `events-${this.loopId}.jsonl`),
+      notifier,
     });
+    this.#executor = executor ?? new DryRunExecutor();
     this.#statePath = join(vigilDir, `loop-${this.loopId}.json`);
     // 若以已有 loopId 构造（--resume 路径），恢复先前状态，使 resume 能正确判门
     if (loopId) {
@@ -78,6 +97,7 @@ export class DecisionLoop {
         this.#status = prev.status;
         this.#lastOutcome = prev.outcome;
         this.#decisionDetail = prev.decisionDetail;
+        this.#brief = prev.brief;
         this.#createdAt = prev.createdAt;
       }
     }
@@ -102,6 +122,7 @@ export class DecisionLoop {
     };
     if (this.#lastOutcome !== undefined) state.outcome = this.#lastOutcome;
     if (this.#decisionDetail !== undefined) state.decisionDetail = this.#decisionDetail;
+    if (this.#brief !== undefined) state.brief = this.#brief;
     return state;
   }
 
@@ -121,7 +142,9 @@ export class DecisionLoop {
     for (const evidence of this.#goal.evidence) {
       const price = evidence.priceRMB !== undefined ? ` ¥${evidence.priceRMB}` : '';
       const mark = evidence.verified ? '✓已核验' : '·未核验';
-      this.#bus.emit('evidence_gathered', 'info', `[${evidence.channel}] ${evidence.source}${price} ${mark}`);
+      const dim = evidence.dimension ?? evidence.channel;
+      const detail = evidence.note ? ` — ${evidence.note}` : '';
+      this.#bus.emit('evidence_gathered', 'info', `[${dim}/${evidence.channel}] ${evidence.source}${price} ${mark}${detail}`);
     }
 
     const completeness = checkCompleteness(this.#goal.evidence, this.#goal.evidenceSpec, {
@@ -140,15 +163,36 @@ export class DecisionLoop {
     }
     this.#bus.emit('evidence_complete', 'info', '✓ 全渠道证据已覆盖，放行裁决');
 
+    // 证据驱动裁决：把实时证据转成有数据支撑的方案（invest/financing 即具体仓位）
+    this.#brief = buildBrief(this.#goal.domain ?? 'custom', this.#goal.question, this.#goal.evidence);
+    this.#bus.emit('reasoning', 'info', `证据驱动分析：${this.#brief.signalSummary}`);
+    if (this.#brief.kind === 'allocation') {
+      this.#bus.emit(
+        'reasoning',
+        'info',
+        `建议配置（合计 ${this.#brief.totalWeightPct}%）：` +
+          this.#brief.allocation.map((a) => `${a.asset} ${a.weightPct}%`).join(' / '),
+      );
+      this.#bus.emit('reasoning', 'info', `置信度：${this.#brief.confidence}`);
+    }
+    for (const cav of this.#brief.caveats) {
+      this.#bus.emit('reasoning', 'info', `⚠ 提示：${cav}`);
+    }
+
     this.#bus.emit('arbitrating', 'info', '进入仲裁：综合各立场与已核验证据定夺');
     const result = await arbitrate(this.#kernel, {
       sessionId: this.#goal.sessionId,
       question: this.#goal.question,
       action: this.#goal.action,
       positions: this.#goal.positions,
+      brief: this.#brief,
     });
     this.#lastOutcome = result.decision;
-    this.#decisionDetail = `${result.resolution}：${result.reason}`;
+    const allocText =
+      this.#brief.kind === 'allocation'
+        ? `；建议配置：${this.#brief.allocation.map((a) => `${a.asset} ${a.weightPct}%`).join('/')}`
+        : '';
+    this.#decisionDetail = `${result.resolution}：${result.reason}${allocText}`;
     this.#bus.emit(
       'decision',
       result.decision === 'deny' ? 'alert' : 'info',
@@ -215,22 +259,44 @@ export class DecisionLoop {
   }
 
   async #execute(): Promise<void> {
-    this.#bus.emit('executing', 'info', '执行闭环（dry-run，不发生真实交易）：');
+    const isGated = isGatedAction(this.#goal.action);
+    this.#bus.emit(
+      'executing',
+      'info',
+      `执行闭环（执行器=${this.#executor.id}${isGated ? '，已通过确认闸门' : ''}）：`,
+    );
     const steps =
       this.#goal.plan && this.#goal.plan.length > 0
         ? this.#goal.plan
         : [
             '比对已核验证据中的最优选项',
             '锁定满足约束的选项',
-            '生成执行清单与凭据（待你最终点确认后真实提交）',
+            '生成执行清单与凭据',
           ];
     for (const step of steps) {
       this.#bus.emit('executing', 'info', `  → ${step}`);
     }
+
+    // 真正落地：只有走到这里（裁决通过 + 已确认）才会调用执行器。
+    // deny 永远到不了这里；未确认时循环停在 awaiting_confirmation。
+    const result = await this.#executor.execute({
+      sessionId: this.#goal.sessionId,
+      question: this.#goal.question,
+      action: this.#goal.action,
+      costUsd: this.#goal.costUsd,
+      brief: this.#brief,
+    });
+    this.#bus.emit(
+      'executing',
+      result.ok ? 'info' : 'alert',
+      `执行结果：${result.detail}${result.externalRef ? `（外部引用 ${result.externalRef}）` : ''}`,
+    );
     this.#bus.emit(
       'completed',
       'info',
-      '✓ 闭环执行完成（dry-run）。真实下单/划转需你最终点确认。',
+      this.#executor.id === 'dry-run'
+        ? '✓ 闭环执行完成（dry-run，未发生真实交易）。接真实执行适配器并确认后才会真实下单/划转。'
+        : '✓ 闭环执行完成（已真实触发执行适配器）。',
     );
     this.#status = 'completed';
     this.#saveState();

@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import type { Notifier } from './notifier.ts';
 
 /**
  * 决策循环的各个阶段。每个阶段都会发射一个事件，
@@ -11,6 +12,7 @@ export type LoopStage =
   | 'evidence_gathered'
   | 'evidence_complete'
   | 'evidence_gap'
+  | 'reasoning'
   | 'arbitrating'
   | 'decision'
   | 'gate'
@@ -43,10 +45,12 @@ export class LoopEventBus {
   readonly loopId: string;
   #sinks: EventSink[] = [];
   #logPath: string | undefined;
+  #notifier: Notifier | undefined;
 
-  constructor(loopId: string, opts?: { logPath?: string }) {
+  constructor(loopId: string, opts?: { logPath?: string; notifier?: Notifier }) {
     this.loopId = loopId;
     this.#logPath = opts?.logPath;
+    this.#notifier = opts?.notifier;
     if (this.#logPath) {
       const dir = dirname(this.#logPath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -57,6 +61,10 @@ export class LoopEventBus {
     this.#sinks.push(sink);
   }
 
+  /**
+   * 发射事件：同步推给订阅者、落盘（供 --watch 回看），并异步推送到已配置通道。
+   * 推送是旁路：失败只吞掉，绝不因通道抖动卡死决策循环。
+   */
   emit(stage: LoopStage, level: EventLevel, message: string, data?: unknown): LoopEvent {
     const event: LoopEvent = {
       ts: new Date().toISOString(),
@@ -68,6 +76,11 @@ export class LoopEventBus {
     if (data !== undefined) event.data = data;
     for (const sink of this.#sinks) sink(event);
     if (this.#logPath) appendFileSync(this.#logPath, `${JSON.stringify(event)}\n`);
+    if (this.#notifier) {
+      void this.#notifier.notify(event).catch((err) => {
+        process.stderr.write(`[vigil] 推送失败（${this.#notifier?.id}）：${err instanceof Error ? err.message : String(err)}\n`);
+      });
+    }
     return event;
   }
 }

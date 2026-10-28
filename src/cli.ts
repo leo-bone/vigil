@@ -25,7 +25,9 @@ import type { Position } from './pipeline/arbiter.ts';
 import { join } from 'node:path';
 import { DecisionLoop, loadLoopState, type LoopGoal } from './loop/decisionLoop.ts';
 import { resolveDomainSpec, listDomains, type EvidenceSpec } from './loop/evidence.ts';
-import { gatherEvidence, defaultSources } from './loop/evidenceProvider.ts';
+import { gatherEvidence, defaultSources, extendedSources } from './loop/evidenceProvider.ts';
+import { buildNotifiers, MultiNotifier, type Notifier } from './loop/notifier.ts';
+import { buildExecutor, type ActionExecutor } from './loop/executor.ts';
 import { loadEventLog, type LoopEvent } from './loop/events.ts';
 import { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
 import { KILL_FILE, engageKill, readKillState, releaseKill } from './policy/killswitch.ts';
@@ -244,10 +246,10 @@ vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转�
   vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
   vigil arbitrate <文件.json|->    多 agent 结论冲突时定夺
-  vigil loop <goal.json> [--auto-confirm] [--gather]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行（--gather 实时补抓证据）
-  vigil loop --resume <id> [--confirm]      从挂起恢复（确认后闭环执行）
+  vigil loop <goal.json> [--auto-confirm] [--gather] [--extended]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行（--gather 实时补抓证据，--extended 含加密/股指源）
+  vigil loop --resume <id> [--confirm]      从挂起恢复（确认后闭环执行，确认后才真实触发执行适配器）
   vigil loop --watch <id>          实时回看某循环的事件流
-  vigil evidence fetch <领域> "<问题>"      实时采集该领域必备维度证据（附 source URL + 抓取时间戳）
+  vigil evidence fetch <领域> "<问题>" [--extended]      实时采集该领域必备维度证据（附 source URL + 抓取时间戳；--extended 含加密/股指源）
   vigil domains                  列出所有支持的决策领域（衣食住行/工作/购物/旅行/融资/医疗/教育…）
   vigil decide <文件.json|->     请求裁决，结果写入账本
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
@@ -279,6 +281,18 @@ vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转�
   VIGIL_MODEL          模型名，默认 jev-latest
   VIGIL_SHADOW=1     影子模式：只记账不拦截
   VIGIL_ACTOR        agent 在账本里的身份，默认 agent/claude
+  推送通道（决策事件主动推送，把"实时知道"从拉变推）：
+  VIGIL_NOTIFY_WECOM        企业微信群机器人 webhook 完整 URL
+  VIGIL_NOTIFY_WEBHOOK      通用 webhook URL（飞书/Slack/Discord/Zapier…）
+  VIGIL_NOTIFY_EMAIL_API    邮件 API endpoint（Resend/Mailgun/SendGrid 形态）
+  VIGIL_NOTIFY_EMAIL_KEY    邮件 API key（可选）
+  VIGIL_NOTIFY_EMAIL_FROM   发件人
+  VIGIL_NOTIFY_EMAIL_TO     收件人
+  真实执行（确认闸门放行后才触发，默认 dry-run）：
+  VIGIL_EXECUTOR_WEBHOOK    配置后，已确认动作 POST 到该端点（你的券商/开户/支付系统）
+  VIGIL_EXECUTOR_WEBHOOK_KEY 上述端点的鉴权 Bearer（可选）
+  VIGIL_EXTENDED_SOURCES=1  默认纳入加密/股指等扩展实时源（CLI 也可用 --extended）
+  VIGIL_AV_KEY        AlphaVantage key（国债源，不填用 demo）
 `);
 }
 
@@ -934,15 +948,16 @@ async function main(): Promise<void> {
     }
 
     case 'evidence': {
-      // vigil evidence fetch <domain> "<question>"
+      // vigil evidence fetch <domain> "<question>" [--extended]
       const sub = rest[0];
-      if (sub !== 'fetch') throw new Error('用法：vigil evidence fetch <domain> "<问题>"');
+      if (sub !== 'fetch') throw new Error('用法：vigil evidence fetch <domain> "<问题>" [--extended]');
       const domainKey = rest[1];
-      const question = rest.slice(2).join(' ').replace(/^"|"$/g, '');
-      if (!domainKey || !question) throw new Error('用法：vigil evidence fetch <domain> "<问题>"');
+      const question = rest.slice(2).join(' ').replace(/^"|"$/g, '').replace(/--extended$/, '').trim();
+      if (!domainKey || !question) throw new Error('用法：vigil evidence fetch <domain> "<问题>" [--extended]');
       const spec = resolveDomainSpec(domainKey);
-      const result = await gatherEvidence(spec, question, domainKey, defaultSources());
-      process.stdout.write(`实时证据采集（领域=${domainKey}，问题="${question}"）\n`);
+      const extended = rest.includes('--extended') || !!process.env.VIGIL_EXTENDED_SOURCES;
+      const result = await gatherEvidence(spec, question, domainKey, defaultSources(), { extended });
+      process.stdout.write(`实时证据采集（领域=${domainKey}，问题="${question}"${extended ? '，含扩展源(加密/股指)' : ''}）\n`);
       process.stdout.write(`已实时核验：${result.gathered.join(' / ') || '（无）'}\n`);
       process.stdout.write(`未核验（需人工/搜索补充）：${result.unverified.join(' / ') || '（无）'}\n`);
       process.stdout.write(`\n${JSON.stringify({ domain: domainKey, evidence: result.evidence }, null, 2)}\n`);
@@ -954,6 +969,7 @@ async function main(): Promise<void> {
       const confirmFlag = rest.includes('--confirm');
       const autoConfirm = rest.includes('--auto-confirm');
       const gatherFlag = rest.includes('--gather');
+      const extendedFlag = rest.includes('--extended') || !!process.env.VIGIL_EXTENDED_SOURCES;
       const vigilDir = process.env.VIGIL_DIR ?? '.vigil';
       // 决策循环里，金钱动作的授权由"确认闸门"统一接管（human-in-the-loop），
       // 因此内核的单笔金额上限在此放开到极大，避免自主花费护栏误杀本应交付给人工确认的高额决策。
@@ -961,6 +977,13 @@ async function main(): Promise<void> {
         { ...currentPolicy(), moneyCapPerAction: Number.MAX_SAFE_INTEGER },
         packRules(),
       );
+
+      // 推送通道：从环境变量构建（企微/通用 webhook/邮件）。未配置则不推送，仅落盘供 --watch。
+      const notifiers = buildNotifiers();
+      const notifier: Notifier | undefined =
+        notifiers.length > 1 ? new MultiNotifier(notifiers) : notifiers[0];
+      // 执行适配器：默认 dry-run；配置 VIGIL_EXECUTOR_WEBHOOK 后真实触发你自己的下单/开户端点。
+      const executor = buildExecutor();
 
       const sink = (event: LoopEvent): void => {
         const t = event.ts.slice(11, 19);
@@ -990,14 +1013,14 @@ async function main(): Promise<void> {
           );
           return;
         }
-        const loop = new DecisionLoop(kernel, state.goal, vigilDir, id);
+        const loop = new DecisionLoop(kernel, state.goal, vigilDir, id, notifier, executor);
         loop.on(sink);
         const final = await loop.resume(confirmFlag);
         process.stdout.write(`\n循环状态：${final.status}\n`);
         return;
       }
 
-      if (!file) throw new Error('用法：vigil loop <goal.json> [--auto-confirm]');
+      if (!file) throw new Error('用法：vigil loop <goal.json> [--auto-confirm] [--gather] [--extended]');
       const parsed = JSON.parse(readFileSync(file, 'utf8')) as LoopGoal & {
         evidenceSpec?: EvidenceSpec | string;
       };
@@ -1015,17 +1038,20 @@ async function main(): Promise<void> {
       } else {
         spec = resolveDomainSpec('purchase');
       }
-      const goal: LoopGoal = { ...parsed, evidenceSpec: spec, autoConfirm };
+      const goal: LoopGoal = { ...parsed, evidenceSpec: spec, domain: domainKey, autoConfirm };
 
       // 实时证据采集：证据为空或显式 --gather 时，用实时源补抓（已核验的沿用既有）
       if (gatherFlag || (Array.isArray(parsed.evidence) && parsed.evidence.length === 0)) {
-        process.stdout.write(`\n[实时采集] 正在抓取 ${domainKey} 领域证据…\n`);
+        process.stdout.write(`\n[实时采集] 正在抓取 ${domainKey} 领域证据…${extendedFlag ? '（含扩展源）' : ''}\n`);
         const gatherRes = await gatherEvidence(
           spec,
           parsed.question ?? file ?? '',
           domainKey,
           defaultSources(),
-          { existing: Array.isArray(parsed.evidence) ? parsed.evidence : [] },
+          {
+            existing: Array.isArray(parsed.evidence) ? parsed.evidence : [],
+            extended: extendedFlag,
+          },
         );
         goal.evidence = gatherRes.evidence;
         process.stdout.write(
@@ -1034,7 +1060,7 @@ async function main(): Promise<void> {
         );
       }
 
-      const loop = new DecisionLoop(kernel, goal, vigilDir);
+      const loop = new DecisionLoop(kernel, goal, vigilDir, undefined, notifier, executor);
       loop.on(sink);
       const final = await loop.run();
       process.stdout.write(`\n循环 ID：${loop.loopId}\n`);

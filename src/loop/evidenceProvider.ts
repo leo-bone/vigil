@@ -3,9 +3,12 @@
  *
  * 这是把"证据真实完整"从"人/agent 手填 JSON"升级为"系统自己跑"的关键一步。
  * 设计原则（诚实闭环，绝不假核验）：
- *   1. 能机读的维度（如汇率）→ 用真实公开 API 实时抓取，附 source URL + 抓取时间戳 + verified:true。
- *   2. 抓不到的维度（如政策/专家/风险）→ 没有可用后端时返回 verified:false，
- *      交给证据完整性闸门拦截，强制人工/搜索补充，绝不编造"已核验"。
+ *   1. 能机读的维度（汇率、贵金属、国债、行情）→ 用真实公开 API 实时抓取，
+ *      附 source URL + 抓取时间戳 + verified:true；
+ *   2. 抓不到的维度（政策/专家/风险）→ 没有可用后端时返回 verified:false，
+ *      交给证据完整性闸门拦截，强制人工/搜索补充，绝不编造"已核验"；
+ *   3. 同一规范维度可挂多路实时源（如 invest/financial 同时有 FX、黄金、国债、行情），
+ *      只要其中一路成功核验，该维度即视为已覆盖。
  *
  * 之所以这样设计：首轮翻车就是"漏了国补、还假设线上价"——证据必须是真的，
  * 系统要么拿到真数据，要么明说"我没拿到"，而不能默默填个数。
@@ -22,11 +25,13 @@ export interface EvidenceQuery {
   question: string;
 }
 
-/** 某个源能服务的 (领域, 维度) 能力描述 */
+/** 某个源能服务的 (领域, 维度, 通道) 能力描述 */
 export interface SourceCapability {
   /** 限定领域；省略表示任意领域 */
   domain?: string;
   dimension: EvidenceDimension;
+  /** 该源在此维度下产出的唯一通道标签（用于在同类维度中区分，例如 fx-usd-cny / gold-xau） */
+  channel: string;
 }
 
 /** 一个实时证据源 */
@@ -41,6 +46,19 @@ function matches(source: EvidenceSource, q: EvidenceQuery): boolean {
   return source.serves.some(
     (c) => (c.domain === undefined || c.domain === q.domain) && c.dimension === q.dimension,
   );
+}
+
+/** 带超时的 fetch，避免某个不可达源把整个采集卡死 */
+async function fetchJson(url: string, timeoutMs = 7000): Promise<unknown> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as unknown;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** 可注入的搜索函数：用于政策/专家/风险等无法机读的维度 */
@@ -58,23 +76,25 @@ export const NO_SEARCH: SearchFn = async () => {
 export class FrankfurterFxSource implements EvidenceSource {
   id = 'frankfurter';
   serves: SourceCapability[] = [
-    { domain: 'invest', dimension: 'financial' },
-    { domain: 'financing', dimension: 'financial' },
+    { domain: 'invest', dimension: 'financial', channel: 'fx-usd-cny' },
+    { domain: 'financing', dimension: 'financial', channel: 'fx-usd-cny' },
   ];
 
   async fetch(_q: EvidenceQuery): Promise<ChannelEvidence> {
     const url = 'https://api.frankfurter.app/latest?from=USD&to=CNY';
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Frankfurter HTTP ${res.status}`);
-    const data = (await res.json()) as { date: string; rates: Record<string, number> };
+    const data = (await fetchJson(url)) as { date: string; rates: Record<string, number> };
     const rate = data.rates?.CNY;
     if (typeof rate !== 'number') throw new Error('Frankfurter 响应缺少 CNY 汇率');
     const fetchedAt = new Date().toISOString();
     return {
-      channel: 'financial',
+      dimension: 'financial',
+      channel: 'fx-usd-cny',
       source: `${url} (date=${data.date})`,
       verified: true,
+      value: rate,
+      unit: 'USD/CNY',
       note: `实时汇率 USD/CNY=${rate}（Frankfurter/ECB 数据，抓取于 ${fetchedAt}）`,
+      capturedAt: fetchedAt,
     };
   }
 }
@@ -85,23 +105,202 @@ export class FrankfurterFxSource implements EvidenceSource {
 export class ErApiFxSource implements EvidenceSource {
   id = 'er-api';
   serves: SourceCapability[] = [
-    { domain: 'invest', dimension: 'financial' },
-    { domain: 'financing', dimension: 'financial' },
+    { domain: 'invest', dimension: 'financial', channel: 'fx-er-api' },
+    { domain: 'financing', dimension: 'financial', channel: 'fx-er-api' },
   ];
 
   async fetch(_q: EvidenceQuery): Promise<ChannelEvidence> {
     const url = 'https://open.er-api.com/v6/latest/USD';
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`er-api HTTP ${res.status}`);
-    const data = (await res.json()) as { time_last_update_utc?: string; rates?: Record<string, number> };
+    const data = (await fetchJson(url)) as { time_last_update_utc?: string; rates?: Record<string, number> };
     const rate = data.rates?.CNY;
     if (typeof rate !== 'number') throw new Error('er-api 响应缺少 CNY 汇率');
     const fetchedAt = new Date().toISOString();
     return {
-      channel: 'financial',
+      dimension: 'financial',
+      channel: 'fx-er-api',
       source: `${url} (updated=${data.time_last_update_utc ?? 'n/a'})`,
       verified: true,
+      value: rate,
+      unit: 'USD/CNY',
       note: `实时汇率 USD/CNY=${rate}（open.er-api.com，抓取于 ${fetchedAt}）`,
+      capturedAt: fetchedAt,
+    };
+  }
+}
+
+/**
+ * 现货黄金价格源（gold-api.com，无需 key，沙箱内可达）。
+ * 服务 invest / financing 的 financial 维度，作为独立行情而非"卖方喊单"。
+ */
+export class GoldSource implements EvidenceSource {
+  id = 'gold-api';
+  serves: SourceCapability[] = [
+    { domain: 'invest', dimension: 'financial', channel: 'gold-xau' },
+    { domain: 'financing', dimension: 'financial', channel: 'gold-xau' },
+  ];
+
+  async fetch(_q: EvidenceQuery): Promise<ChannelEvidence> {
+    const url = 'https://api.gold-api.com/price/XAU';
+    const data = (await fetchJson(url)) as { updatedAt?: string; price?: number };
+    const price = data.price;
+    if (typeof price !== 'number') throw new Error('gold-api 响应缺少 price');
+    const fetchedAt = new Date().toISOString();
+    return {
+      dimension: 'financial',
+      channel: 'gold-xau',
+      source: `${url} (updatedAt=${data.updatedAt ?? 'n/a'})`,
+      verified: true,
+      value: price,
+      unit: 'USD/oz',
+      note: `现货黄金 XAU/USD = $${price}（gold-api.com，抓取于 ${fetchedAt}）`,
+      capturedAt: fetchedAt,
+    };
+  }
+}
+
+/**
+ * 现货白银价格源（gold-api.com，无需 key）。
+ */
+export class SilverSource implements EvidenceSource {
+  id = 'silver-api';
+  serves: SourceCapability[] = [
+    { domain: 'invest', dimension: 'financial', channel: 'silver-xag' },
+    { domain: 'financing', dimension: 'financial', channel: 'silver-xag' },
+  ];
+
+  async fetch(_q: EvidenceQuery): Promise<ChannelEvidence> {
+    const url = 'https://api.gold-api.com/price/XAG';
+    const data = (await fetchJson(url)) as { updatedAt?: string; price?: number };
+    const price = data.price;
+    if (typeof price !== 'number') throw new Error('gold-api 响应缺少 price');
+    const fetchedAt = new Date().toISOString();
+    return {
+      dimension: 'financial',
+      channel: 'silver-xag',
+      source: `${url} (updatedAt=${data.updatedAt ?? 'n/a'})`,
+      verified: true,
+      value: price,
+      unit: 'USD/oz',
+      note: `现货白银 XAG/USD = $${price}（gold-api.com，抓取于 ${fetchedAt}）`,
+      capturedAt: fetchedAt,
+    };
+  }
+}
+
+/**
+ * 美国 10 年期国债收益率源（AlphaVantage TREASURY_YIELD，无需 key 的 demo 即可用，
+ * 也可通过 VIGIL_AV_KEY 配置正式免费 key 提升配额）。
+ */
+export class TreasuryYieldSource implements EvidenceSource {
+  id = 'alphavantage-treasury';
+  serves: SourceCapability[] = [
+    { domain: 'invest', dimension: 'financial', channel: 'us10y' },
+    { domain: 'financing', dimension: 'financial', channel: 'us10y' },
+  ];
+
+  private apiKey: string;
+  constructor(apiKey?: string) {
+    this.apiKey = apiKey ?? process.env.VIGIL_AV_KEY ?? 'demo';
+  }
+
+  async fetch(_q: EvidenceQuery): Promise<ChannelEvidence> {
+    const url = `https://www.alphavantage.co/query?function=TREASURY_YIELD&interval=monthly&maturity=10year&apikey=${this.apiKey}`;
+    const data = (await fetchJson(url)) as {
+      data?: Array<{ date: string; value: string }>;
+      Note?: string;
+      Information?: string;
+    };
+    const arr = data.data;
+    if (!Array.isArray(arr) || arr.length === 0) {
+      throw new Error(data.Note ?? data.Information ?? 'AlphaVantage 无数据（可能 demo key 配额耗尽）');
+    }
+    const latest = arr[0];
+    const yieldPct = Number(latest.value);
+    if (!Number.isFinite(yieldPct)) throw new Error('缺收益率数值');
+    const fetchedAt = new Date().toISOString();
+    return {
+      dimension: 'financial',
+      channel: 'us10y',
+      source: `${url}`,
+      verified: true,
+      value: yieldPct,
+      unit: '%',
+      note: `美国 10 年期国债收益率 ${latest.date} = ${yieldPct}%（AlphaVantage，抓取于 ${fetchedAt}）`,
+      capturedAt: fetchedAt,
+    };
+  }
+}
+
+/**
+ * 加密资产行情源（CoinGecko simple/price，无需 key，公网可达；沙箱内被出网策略拦截，
+ * 此时诚实标记未核验，待接入可达网络或代理后自动生效）。
+ */
+export class CryptoSource implements EvidenceSource {
+  id = 'coingecko';
+  serves: SourceCapability[] = [
+    { domain: 'invest', dimension: 'financial', channel: 'crypto-btc' },
+    { domain: 'financing', dimension: 'financial', channel: 'crypto-btc' },
+  ];
+
+  async fetch(_q: EvidenceQuery): Promise<ChannelEvidence> {
+    const url = 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd';
+    const data = (await fetchJson(url)) as { bitcoin?: { usd?: number }; ethereum?: { usd?: number } };
+    const btc = data.bitcoin?.usd;
+    if (typeof btc !== 'number') throw new Error('CoinGecko 缺 BTC 价格');
+    const eth = data.ethereum?.usd;
+    const fetchedAt = new Date().toISOString();
+    return {
+      dimension: 'financial',
+      channel: 'crypto-btc',
+      source: url,
+      verified: true,
+      value: btc,
+      unit: 'USD',
+      note: `BTC=$${btc}${eth !== undefined ? `，ETH=$${eth}` : ''}（CoinGecko，抓取于 ${fetchedAt}）`,
+      capturedAt: fetchedAt,
+    };
+  }
+}
+
+/**
+ * 股指行情源（Stooq CSV，无需 key，公网可达；沙箱内可能不可达，诚实降级）。
+ */
+export class StockIndexSource implements EvidenceSource {
+  id = 'stooq';
+  serves: SourceCapability[] = [
+    { domain: 'invest', dimension: 'financial', channel: 'sp500' },
+    { domain: 'financing', dimension: 'financial', channel: 'sp500' },
+  ];
+
+  async fetch(_q: EvidenceQuery): Promise<ChannelEvidence> {
+    const url = 'https://stooq.com/q/l/?s=spx.us&f=sd2t2ohlcv&h&e=csv';
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 7000);
+    let text: string;
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      text = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
+    const lines = text.trim().split('\n').filter(Boolean);
+    if (lines.length < 2) throw new Error('Stooq 返回非预期内容');
+    const cols = lines[0].toLowerCase().split(',');
+    const row = lines[lines.length - 1].split(',');
+    const close = Number(row[cols.indexOf('close')]);
+    const date = row[cols.indexOf('date')];
+    if (!Number.isFinite(close)) throw new Error('Stooq 缺 close 字段');
+    const fetchedAt = new Date().toISOString();
+    return {
+      dimension: 'financial',
+      channel: 'sp500',
+      source: `${url} (date=${date})`,
+      verified: true,
+      value: close,
+      unit: 'pts',
+      note: `S&P 500 收盘 ${date} = ${close}（Stooq，抓取于 ${fetchedAt}）`,
+      capturedAt: fetchedAt,
     };
   }
 }
@@ -116,11 +315,11 @@ export class SearchSource implements EvidenceSource {
   private fn: SearchFn;
   /** 该源负责的非机读维度 */
   serves: SourceCapability[] = [
-    { dimension: 'authoritative' },
-    { dimension: 'regulatory' },
-    { dimension: 'expert' },
-    { dimension: 'risk' },
-    { dimension: 'alternative' },
+    { dimension: 'authoritative', channel: 'web-search' },
+    { dimension: 'regulatory', channel: 'web-search' },
+    { dimension: 'expert', channel: 'web-search' },
+    { dimension: 'risk', channel: 'web-search' },
+    { dimension: 'alternative', channel: 'web-search' },
   ];
 
   constructor(fn: SearchFn = NO_SEARCH) {
@@ -136,17 +335,30 @@ export class SearchSource implements EvidenceSource {
     const snippet = await this.fn(`[${q.dimension}] ${q.question}`);
     const fetchedAt = new Date().toISOString();
     return {
+      dimension: q.dimension,
       channel: q.dimension,
       source: `web-search (query="[${q.dimension}] ${q.question}", fetched=${fetchedAt})`,
       verified: true,
       note: snippet.slice(0, 400),
+      capturedAt: fetchedAt,
     };
   }
 }
 
-/** 默认启用的实时源（无需 key、沙箱可达）。搜索源默认不启用（无后端）。 */
+/** 默认启用的实时源（无需 key、沙箱可达）：FX / 黄金 / 白银 / 国债。 */
 export function defaultSources(): EvidenceSource[] {
-  return [new FrankfurterFxSource(), new ErApiFxSource()];
+  return [
+    new FrankfurterFxSource(),
+    new ErApiFxSource(),
+    new GoldSource(),
+    new SilverSource(),
+    new TreasuryYieldSource(),
+  ];
+}
+
+/** 扩展实时源（公网可达、沙箱可能不可达，需显式开启）：加密资产 / 股指行情。 */
+export function extendedSources(): EvidenceSource[] {
+  return [new CryptoSource(), new StockIndexSource()];
 }
 
 export interface GatherOptions {
@@ -154,11 +366,13 @@ export interface GatherOptions {
   existing?: ChannelEvidence[];
   /** 注入的搜索后端（agent 运行期可把 WebSearch 接进来） */
   search?: SearchFn;
+  /** 是否纳入扩展源（加密/股指等公网源） */
+  extended?: boolean;
 }
 
 export interface GatherResult {
   evidence: ChannelEvidence[];
-  /** 成功采集且 verified 的维度 */
+  /** 已实时核验的维度 */
   gathered: EvidenceDimension[];
   /** 抓不到 / 未核验的维度（完整性闸门会据此拦截） */
   unverified: EvidenceDimension[];
@@ -167,8 +381,8 @@ export interface GatherResult {
 }
 
 /**
- * 按决策规格采集证据：遍历必备维度，用能服务的源实时抓取；
- * 已有 verified 证据的维度直接沿用，不重复抓。抓不到的维度保持未核验。
+ * 按决策规格采集证据：遍历必备维度，用能服务的所有源实时抓取（同一维度可多路）；
+ * 已有 verified 证据的 (维度,通道) 直接沿用，不重复抓。抓不到的维度保持未核验。
  */
 export async function gatherEvidence(
   spec: EvidenceSpec,
@@ -178,48 +392,62 @@ export async function gatherEvidence(
   opts: GatherOptions = {},
 ): Promise<GatherResult> {
   const existing = opts.existing ?? [];
-  const activeSources = opts.search ? [...sources, new SearchSource(opts.search)] : sources;
+  const activeSources = [
+    ...sources,
+    ...(opts.extended ? extendedSources() : []),
+    ...(opts.search ? [new SearchSource(opts.search)] : []),
+  ];
 
   const evidence: ChannelEvidence[] = [];
-  const gathered: EvidenceDimension[] = [];
-  const unverified: EvidenceDimension[] = [];
 
   for (const dim of spec.required) {
-    // 沿用已核验的既有证据
-    const prior = existing.find((e) => e.channel === dim && e.verified);
-    if (prior) {
-      evidence.push(prior);
-      gathered.push(dim);
+    // 先沿用已核验的既有证据（整维度）：手填/搜索已核验的，不重复抓取，避免把真实证据丢掉
+    const priorVerified = existing.filter((e) => (e.dimension ?? e.channel) === dim && e.verified);
+    if (priorVerified.length > 0) {
+      for (const p of priorVerified) evidence.push(p);
       continue;
     }
-    const src = activeSources.find((s) =>
+
+    const sourcesForDim = activeSources.filter((s) =>
       s instanceof SearchSource ? s.canServe({ dimension: dim, domain, question }) : matches(s, { dimension: dim, domain, question }),
     );
-    if (!src) {
+
+    if (sourcesForDim.length === 0) {
       evidence.push({
+        dimension: dim,
         channel: dim,
         source: '(none)',
         verified: false,
         note: '无可用实时源，需人工 / 搜索补充',
       });
-      unverified.push(dim);
       continue;
     }
-    try {
-      const ev = await src.fetch({ dimension: dim, domain, question });
-      evidence.push(ev);
-      if (ev.verified) gathered.push(dim);
-      else unverified.push(dim);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      evidence.push({
-        channel: dim,
-        source: src.id,
-        verified: false,
-        note: `采集失败：${msg}`,
-      });
-      unverified.push(dim);
+
+    for (const src of sourcesForDim) {
+      const cap = src.serves.find((c) => (c.domain === undefined || c.domain === domain) && c.dimension === dim);
+      const channel = cap?.channel ?? src.id;
+      try {
+        const ev = await src.fetch({ dimension: dim, domain, question });
+        evidence.push(ev);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        evidence.push({
+          dimension: dim,
+          channel,
+          source: src.id,
+          verified: false,
+          note: `采集失败：${msg}`,
+        });
+      }
     }
+  }
+
+  // 以"维度是否至少有 1 条 verified"汇总，与完整性闸门口径一致
+  const gathered: EvidenceDimension[] = [];
+  const unverified: EvidenceDimension[] = [];
+  for (const dim of spec.required) {
+    const hasVerified = evidence.some((e) => (e.dimension ?? e.channel) === dim && e.verified);
+    (hasVerified ? gathered : unverified).push(dim);
   }
 
   return { evidence, gathered, unverified, fullyLive: unverified.length === 0 };

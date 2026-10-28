@@ -24,13 +24,22 @@ export const EVIDENCE_DIMENSIONS = [
 export type EvidenceDimension = (typeof EVIDENCE_DIMENSIONS)[number];
 
 export interface ChannelEvidence {
-  channel: EvidenceDimension;
+  /** 规范维度：证据完整性闸门以此为准（同一维度可有多条证据） */
+  dimension: EvidenceDimension;
+  /** 具体来源通道标签：用于在同类维度中区分，例如 fx-usd-cny / gold-xau / us10y */
+  channel: string;
   source: string;
   /** 该维度关联的实付价/成本（如适用，单位 RMB） */
   priceRMB?: number;
   /** 是否已独立核验 */
   verified: boolean;
   note?: string;
+  /** 实时抓取时间戳（机读源会填；手填证据建议也填，便于追溯） */
+  capturedAt?: string;
+  /** 机读源解析出的结构化数值（如汇率 6.67、金价 4045），供证据驱动裁决直接消费 */
+  value?: number;
+  /** 数值单位/标签（如 'USD/CNY'、'USD/oz'、'%'），与 value 配套 */
+  unit?: string;
 }
 
 export interface EvidenceSpec {
@@ -54,11 +63,15 @@ export function checkCompleteness(
   spec: EvidenceSpec,
   opts: CompletenessOptions = {},
 ): { complete: boolean; missing: EvidenceDimension[] } {
+  // 同一规范维度可有多条证据（例如 invest/financial 同时有 FX、黄金、国债）。
+  // 闸门以 dimension 为准：只要该维度有一条 verified 即算已核验。
+  // 旧证据可能只填了 channel（=维度），这里兼容回退到 channel。
   const covered = new Map<EvidenceDimension, boolean>();
   for (const item of evidence) {
-    const existing = covered.get(item.channel);
+    const dim = item.dimension ?? item.channel;
+    const existing = covered.get(dim);
     // 同一维度多条证据：只要有一条 verified 即算已核验
-    covered.set(item.channel, existing === true ? true : item.verified);
+    covered.set(dim, existing === true ? true : item.verified);
   }
   const missing = spec.required.filter((dim) => {
     const mark = covered.get(dim);
