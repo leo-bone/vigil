@@ -22,6 +22,10 @@ import { CONFIG_BASENAME, loadPolicyConfig, savePolicyConfig } from './policy/co
 import { Orchestrator, createPipelineKernel } from './pipeline/orchestrator.ts';
 import { arbitrate } from './pipeline/arbiter.ts';
 import type { Position } from './pipeline/arbiter.ts';
+import { join } from 'node:path';
+import { DecisionLoop, loadLoopState, type LoopGoal } from './loop/decisionLoop.ts';
+import { PURCHASE_EVIDENCE_SPEC, type EvidenceSpec } from './loop/evidence.ts';
+import { loadEventLog, type LoopEvent } from './loop/events.ts';
 import { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
 import { KILL_FILE, engageKill, readKillState, releaseKill } from './policy/killswitch.ts';
 import { doctor, init } from './policy/doctor.ts';
@@ -239,6 +243,9 @@ vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转�
   vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
   vigil arbitrate <文件.json|->    多 agent 结论冲突时定夺
+  vigil loop <goal.json> [--auto-confirm]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行
+  vigil loop --resume <id> [--confirm]      从挂起恢复（确认后闭环执行）
+  vigil loop --watch <id>          实时回看某循环的事件流
   vigil decide <文件.json|->     请求裁决，结果写入账本
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
   vigil hook claude [--shadow]  作为 Claude Code 的 PreToolUse 钩子运行
@@ -920,6 +927,67 @@ async function main(): Promise<void> {
         process.stdout.write(`\n决策号 ${result.verdict.decisionId}，记录哈希 ${result.verdict.recordHash.slice(0, 12)}…\n`);
       }
       if (result.decision !== 'allow') process.exitCode = 2;
+      return;
+    }
+
+    case 'loop': {
+      const file = rest.find((arg) => !arg.startsWith('--'));
+      const confirmFlag = rest.includes('--confirm');
+      const autoConfirm = rest.includes('--auto-confirm');
+      const vigilDir = process.env.VIGIL_DIR ?? '.vigil';
+      const kernel = buildKernel({ ...currentPolicy(), moneyCapPerAction: 1000 }, packRules());
+
+      const sink = (event: LoopEvent): void => {
+        const t = event.ts.slice(11, 19);
+        const icon = event.level === 'alert' ? '🔔' : event.level === 'gate' ? '⏸' : '·';
+        process.stdout.write(`[${t}] ${icon} ${event.message}\n`);
+      };
+
+      const watchIdx = rest.indexOf('--watch');
+      if (watchIdx >= 0) {
+        const id = rest[watchIdx + 1];
+        if (!id) throw new Error('用法：vigil loop --watch <loopId>');
+        const events = loadEventLog(join(vigilDir, `events-${id}.jsonl`));
+        if (events.length === 0) process.stdout.write(`（该循环暂无事件记录）\n`);
+        for (const event of events) sink(event);
+        return;
+      }
+
+      const resumeIdx = rest.indexOf('--resume');
+      if (resumeIdx >= 0) {
+        const id = rest[resumeIdx + 1];
+        if (!id) throw new Error('用法：vigil loop --resume <loopId> [--confirm]');
+        const state = loadLoopState(vigilDir, id);
+        if (!state) throw new Error(`找不到循环状态：${id}`);
+        const loop = new DecisionLoop(kernel, state.goal, vigilDir, id);
+        loop.on(sink);
+        const final = await loop.resume(confirmFlag);
+        process.stdout.write(`\n循环状态：${final.status}\n`);
+        return;
+      }
+
+      if (!file) throw new Error('用法：vigil loop <goal.json> [--auto-confirm]');
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as LoopGoal & {
+        evidenceSpec?: EvidenceSpec | string;
+      };
+      let spec: EvidenceSpec;
+      if (typeof parsed.evidenceSpec === 'string') {
+        if (parsed.evidenceSpec === 'purchase') spec = PURCHASE_EVIDENCE_SPEC;
+        else throw new Error(`未知证据规格：${parsed.evidenceSpec}（支持 purchase）`);
+      } else if (parsed.evidenceSpec) {
+        spec = parsed.evidenceSpec;
+      } else {
+        spec = PURCHASE_EVIDENCE_SPEC;
+      }
+      const goal: LoopGoal = { ...parsed, evidenceSpec: spec, autoConfirm };
+      const loop = new DecisionLoop(kernel, goal, vigilDir);
+      loop.on(sink);
+      const final = await loop.run();
+      process.stdout.write(`\n循环 ID：${loop.loopId}\n`);
+      process.stdout.write(`循环状态：${final.status}\n`);
+      if (final.status === 'awaiting_confirmation') {
+        process.stdout.write(`⏸ 已挂起等待你确认。恢复：vigil loop --resume ${loop.loopId} --confirm\n`);
+      }
       return;
     }
 
