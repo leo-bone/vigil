@@ -163,8 +163,14 @@ export class DecisionLoop {
     }
     this.#bus.emit('evidence_complete', 'info', '✓ 全渠道证据已覆盖，放行裁决');
 
-    // 证据驱动裁决：把实时证据转成有数据支撑的方案（invest/financing 即具体仓位）
-    this.#brief = buildBrief(this.#goal.domain ?? 'custom', this.#goal.question, this.#goal.evidence);
+    // 证据驱动裁决：把实时证据转成有数据支撑的方案（invest/financing 即具体仓位；其余领域生成多方案决策矩阵）
+    const requiredDims = this.#goal.evidenceSpec?.required;
+    this.#brief = buildBrief(
+      this.#goal.domain ?? 'custom',
+      this.#goal.question,
+      this.#goal.evidence,
+      requiredDims,
+    );
     this.#bus.emit('reasoning', 'info', `证据驱动分析：${this.#brief.signalSummary}`);
     if (this.#brief.kind === 'allocation') {
       this.#bus.emit(
@@ -174,6 +180,22 @@ export class DecisionLoop {
           this.#brief.allocation.map((a) => `${a.asset} ${a.weightPct}%`).join(' / '),
       );
       this.#bus.emit('reasoning', 'info', `置信度：${this.#brief.confidence}`);
+    } else if (this.#brief.kind === 'matrix' && this.#brief.options) {
+      for (const o of this.#brief.options) {
+        const tag = o.option === this.#brief.recommendedOption ? '★推荐' : '      ';
+        this.#bus.emit(
+          'reasoning',
+          'info',
+          `  ${tag} ${o.option}：证据完整度 ${(o.coverage * 100).toFixed(0)}%` +
+            (o.riskFlags.length ? `，风险红牌 ${o.riskFlags.length} 条` : '') +
+            (o.missingDims.length ? `，缺 ${o.missingDims.join('/')}` : ''),
+        );
+      }
+      this.#bus.emit(
+        'reasoning',
+        'info',
+        `置信度：${this.#brief.confidence}；推荐方案：${this.#brief.recommendedOption ?? '（并列，未定）'}`,
+      );
     }
     for (const cav of this.#brief.caveats) {
       this.#bus.emit('reasoning', 'info', `⚠ 提示：${cav}`);
@@ -265,7 +287,7 @@ export class DecisionLoop {
       'info',
       `执行闭环（执行器=${this.#executor.id}${isGated ? '，已通过确认闸门' : ''}）：`,
     );
-    const steps =
+    let steps: string[] =
       this.#goal.plan && this.#goal.plan.length > 0
         ? this.#goal.plan
         : [
@@ -273,6 +295,20 @@ export class DecisionLoop {
             '锁定满足约束的选项',
             '生成执行清单与凭据',
           ];
+    // 有决策简报时，把"真正决策出的结论"写进执行清单，让闭环落地的是决策本身而非空话
+    if (this.#brief?.kind === 'matrix' && this.#brief.recommendedOption) {
+      steps = [
+        `依据决策矩阵，推荐方案为「${this.#brief.recommendedOption}」（完整度 ${(this.#brief.options?.find((o) => o.option === this.#brief?.recommendedOption)?.coverage ?? 0) * 100}%）`,
+        '锁定该方案并列出待补证据（见 reasoning 阶段警示）',
+        '生成执行清单与凭据，待你最终确认后真实推进',
+      ];
+    } else if (this.#brief?.kind === 'allocation') {
+      steps = [
+        `依据实时信号配置：${this.#brief.allocation.map((a) => `${a.asset} ${a.weightPct}%`).join(' / ')}`,
+        '锁定各标的与权重，待你最终确认后真实下单',
+        '生成执行清单与凭据',
+      ];
+    }
     for (const step of steps) {
       this.#bus.emit('executing', 'info', `  → ${step}`);
     }

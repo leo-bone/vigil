@@ -15,7 +15,8 @@
  *     避免越界给出无依据的"建议"。
  */
 
-import type { ChannelEvidence } from './evidence.ts';
+import type { ChannelEvidence, EvidenceDimension } from './evidence.ts';
+import { resolveDomainSpec } from './evidence.ts';
 
 /** 单一资产的配置建议（权重 + 引用实时数据的理由） */
 export interface AllocationSlice {
@@ -33,6 +34,22 @@ export interface AllocationSlice {
 
 export type Confidence = 'low' | 'medium' | 'high';
 
+/** 多方案决策矩阵中的单个方案评分 */
+export interface DecisionOptionScore {
+  /** 方案标签，如「专升本」「竞赛免试升本科」 */
+  option: string;
+  /** 该方案已核验的必备维度 */
+  verifiedDims: EvidenceDimension[];
+  /** 该方案缺失（未核验）的必备维度 */
+  missingDims: EvidenceDimension[];
+  /** 风险维度的已核验红牌（note 列表） */
+  riskFlags: string[];
+  /** 证据完整度 0~1 = 已核验必备维度 / 总必备维度 */
+  coverage: number;
+  /** 综合得分（coverage 减去风险惩罚，用于排序） */
+  score: number;
+}
+
 /** 一份证据驱动的决策简报 */
 export interface DecisionBrief {
   domain: string;
@@ -49,8 +66,12 @@ export interface DecisionBrief {
   caveats: string[];
   /** 一句话结论 */
   recommendation: string;
-  /** 'allocation' = 已算出配置；'generic' = 仅证据摘要 */
-  kind: 'allocation' | 'generic';
+  /** 'allocation' = 已算出配置；'generic' = 仅证据摘要；'matrix' = 多方案决策矩阵 */
+  kind: 'allocation' | 'generic' | 'matrix';
+  /** 多方案决策矩阵（matrix 时有内容） */
+  options?: DecisionOptionScore[];
+  /** 矩阵推荐方案标签 */
+  recommendedOption?: string;
 }
 
 /** 取某通道已核验证据的结构化数值 */
@@ -70,28 +91,61 @@ const ALLOCATION_DOMAINS = new Set(['invest', 'financing']);
  * @param domain 决策领域 key（invest / financing / purchase / medical …）
  * @param question 决策问题
  * @param evidence 已采集证据（含已核验的实时金融数据）
+ * @param requiredDims 该领域的必备证据维度（默认从注册表解析）；多方案矩阵据此计算每个方案的完整度
  */
 export function buildBrief(
   domain: string,
   question: string,
   evidence: ChannelEvidence[],
+  requiredDims?: EvidenceDimension[],
 ): DecisionBrief {
   if (ALLOCATION_DOMAINS.has(domain)) {
     return buildAllocationBrief(domain, question, evidence);
   }
-  return buildGenericBrief(domain, question, evidence);
+  const dims = requiredDims ?? safeRequired(domain);
+  return buildGenericBrief(domain, question, evidence, dims);
 }
 
-/** 通用简报：不编造配置，只把已核验证据整理成裁决可用的依据摘要 */
+/** 从注册表解析必备维度；未知领域回退到证据里出现过的维度，避免崩溃 */
+function safeRequired(domain: string, evidence: ChannelEvidence[]): EvidenceDimension[] {
+  try {
+    return resolveDomainSpec(domain).required;
+  } catch {
+    return Array.from(new Set(evidence.map((e) => e.dimension ?? e.channel))) as EvidenceDimension[];
+  }
+}
+
+/**
+ * 通用简报：非金融领域的决策依据。
+ * - 若证据按 `option` 分组（存在 ≥2 个方案），生成**多方案决策矩阵**：
+ *   每个方案的"必备维度证据完整度×风险红牌"排序，给出推荐方案（透明、可复核）。
+ * - 否则退化为证据摘要，不编造配置。
+ *
+ * 设计底线（与金融配置一致，绝不假决策）：
+ *   - 只按"证据完整度 + 风险红牌"排序，明确说明这不是对方案优劣的价值判断，而是"哪条路证据最充分、风险最可控"；
+ *   - 任一方案缺必备维度 → 保留为警示，不会替你拍板；
+ *   - 有未决风险红牌的方案一律降权并标注。
+ */
 function buildGenericBrief(
   domain: string,
   question: string,
   evidence: ChannelEvidence[],
+  requiredDims?: EvidenceDimension[],
 ): DecisionBrief {
+  const dims = requiredDims ?? safeRequired(domain, evidence);
+  const options = Array.from(
+    new Set(evidence.map((e) => e.option).filter((o): o is string => !!o)),
+  );
+
+  if (options.length >= 2) {
+    return buildMatrixBrief(domain, question, evidence, dims, options);
+  }
+
+  // 单方案 / 无方案：退化为证据摘要
   const verified = evidence.filter((e) => e.verified);
   const signalSummary = verified.length
     ? verified
-        .map((e) => `[${e.dimension}/${e.channel}] ${e.note ?? e.source}`)
+        .map((e) => `[${e.dimension ?? e.channel}/${e.channel}] ${e.note ?? e.source}`)
         .join(' ｜ ')
     : '（无已核验证据可供决策依据）';
   const unverified = evidence
@@ -110,6 +164,88 @@ function buildGenericBrief(
       : [],
     recommendation: '依据已核验证据进行裁决；各维度证据见上方信号摘要。',
     kind: 'generic',
+  };
+}
+
+/**
+ * 多方案决策矩阵：把每种方案在必备维度上的证据完整度算出来，叠加风险红牌惩罚后排序。
+ * 排名逻辑（全部透明可解释，非黑箱）：
+ *   score = 证据完整度(0~1) − (有风险红牌 ? 0.4 : 0)
+ * 推荐 = 得分最高者；若并列或无人全证据，则明确说"证据不足以定"，并列出各方案缺口。
+ */
+function buildMatrixBrief(
+  domain: string,
+  question: string,
+  evidence: ChannelEvidence[],
+  requiredDims: EvidenceDimension[],
+  options: string[],
+): DecisionBrief {
+  const dimOf = (e: ChannelEvidence) => e.dimension ?? e.channel;
+  // 风险红牌关键词：只有风险维度证据明确指向负面结果时才算红牌，避免"已评估风险=有风险"的误判
+  const RED_FLAG = /风险|红牌|危险|失败|坑|拒|不予|不能|不可|极高|极低|缺失|未核验|爆雷|诈骗|副作用|违规|不确定|收紧|低概率|落空/;
+  const scored: DecisionOptionScore[] = options.map((opt) => {
+    const optEv = evidence.filter((e) => e.option === opt);
+    const verifiedDims = requiredDims.filter((d) => optEv.some((e) => dimOf(e) === d && e.verified));
+    const missingDims = requiredDims.filter((d) => !verifiedDims.includes(d));
+    const riskNotes = optEv
+      .filter((e) => dimOf(e) === 'risk' && e.verified && e.note)
+      .map((e) => e.note as string);
+    const riskFlags = riskNotes.filter((n) => RED_FLAG.test(n));
+    const coverage = requiredDims.length ? verifiedDims.length / requiredDims.length : 0;
+    // 惩罚：明确风险红牌重罚(-0.4)；风险维度缺失(未评估)轻罚(-0.15)，因为"未知风险"也需谨慎
+    const penalty = riskFlags.length > 0 ? 0.4 : missingDims.includes('risk') ? 0.15 : 0;
+    const score = Math.max(0, coverage - penalty);
+    return { option: opt, verifiedDims, missingDims, riskFlags, coverage, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored[0];
+  const second = scored[1];
+  const tie = second && Math.abs(top.score - second.score) < 1e-9;
+
+  const caveats: string[] = [];
+  for (const s of scored) {
+    if (s.missingDims.length) {
+      const missingList = s.missingDims.join('、');
+      caveats.push(
+        s.missingDims.includes('risk')
+          ? `「${s.option}」风险维度未评估（${missingList}），建议补齐风险评估后再定`
+          : `「${s.option}」缺未核验维度：${missingList}（建议补齐后再定）`,
+      );
+    }
+    if (s.riskFlags.length) {
+      caveats.push(`「${s.option}」风险红牌：${s.riskFlags.join('；')}`);
+    }
+  }
+
+  const allFull = top.coverage >= 1 && top.riskFlags.length === 0;
+  const confidence: Confidence = allFull && !tie ? 'high' : top.coverage >= 0.6 ? 'medium' : 'low';
+
+  let recommendation: string;
+  if (tie) {
+    recommendation = `「${top.option}」与「${second.option}」证据完整度并列，暂不下最终结论；建议补齐缺口维度（见警示）后再二选一。`;
+  } else if (allFull) {
+    recommendation = `基于当前证据完整度与风险可控度，推荐优先推进「${top.option}」（${requiredDims.length}/${requiredDims.length} 维度已核验、无未决风险）。`;
+  } else {
+    recommendation = `证据最充分的当前是「${top.option}」（完整度 ${(top.coverage * 100).toFixed(0)}%），但仍有缺口/风险，建议补齐后再定稿。`;
+  }
+
+  return {
+    domain,
+    question,
+    generatedAt: new Date().toISOString(),
+    signalSummary: `多方案对比（${options.length} 个方案 × ${requiredDims.length} 必备维度）：` +
+      scored
+        .map((s) => `${s.option} 完整度${(s.coverage * 100).toFixed(0)}%${s.riskFlags.length ? '⚠风险' : ''}`)
+        .join(' ｜ '),
+    allocation: [],
+    totalWeightPct: 0,
+    confidence,
+    caveats,
+    recommendation,
+    kind: 'matrix',
+    options: scored,
+    recommendedOption: tie ? undefined : top.option,
   };
 }
 

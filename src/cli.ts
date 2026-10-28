@@ -24,8 +24,8 @@ import { arbitrate } from './pipeline/arbiter.ts';
 import type { Position } from './pipeline/arbiter.ts';
 import { join } from 'node:path';
 import { DecisionLoop, loadLoopState, type LoopGoal } from './loop/decisionLoop.ts';
-import { resolveDomainSpec, listDomains, type EvidenceSpec } from './loop/evidence.ts';
-import { gatherEvidence, defaultSources, extendedSources } from './loop/evidenceProvider.ts';
+import { resolveDomainSpec, listDomains, type EvidenceSpec, type ChannelEvidence } from './loop/evidence.ts';
+import { gatherEvidence, buildSources } from './loop/evidenceProvider.ts';
 import { buildNotifiers, MultiNotifier, type Notifier } from './loop/notifier.ts';
 import { buildExecutor, type ActionExecutor } from './loop/executor.ts';
 import { loadEventLog, type LoopEvent } from './loop/events.ts';
@@ -232,6 +232,29 @@ function levelLabel(level: number): string {
   return labels[level] ?? `L${level}`;
 }
 
+/**
+ * 从自然语言目标里粗略识别决策领域（关键词匹配，命中第一个即返回）。
+ * 识别不出时回退到 purchase（最通用的购物/决策口径）。
+ * 也可用 `vigil ask "<目标>" --domain <领域>` 强制指定，绕过识别。
+ */
+function detectDomain(text: string): string {
+  const t = text.toLowerCase();
+  const table: Array<[string, string[]]> = [
+    ['invest', ['投资', '理财', '配置', '标的', '基金', '股票', '债券', '黄金', '加密', '比特币', '定投', 'portfolio', 'invest']],
+    ['financing', ['融资', '借贷', '筹款', '保险', '贷款', '理财规划', 'financ']],
+    ['medical', ['医疗', '就医', '用药', '治疗', '体检', '健康', '病', '药', '手术', 'medical', 'health']],
+    ['education', ['升学', '择校', '专业', '培训', '留学', '专升本', '自考', '考研', '高考', '学历', 'education', 'school']],
+    ['travel', ['旅行', '机票', '住宿', '路线', '签证', '目的地', '出行', '旅游', 'travel', 'trip', 'flight']],
+    ['work', ['offer', '跳槽', '创业', '职业', '求职', '工作', '薪资', 'career', 'job', 'work']],
+    ['housing', ['购房', '租房', '装修', '地段', '置业', '买房', 'housing', 'rent', 'apartment']],
+    ['purchase', ['买', '购', '设备', '家电', '数码', '电脑', '手机', '用品', 'buy', 'purchase']],
+  ];
+  for (const [key, kws] of table) {
+    if (kws.some((kw) => t.includes(kw))) return key;
+  }
+  return 'purchase';
+}
+
 function usage(): void {
   process.stdout.write(`vigil — AI 决策账本与熔断内核
 
@@ -252,6 +275,7 @@ vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转�
   vigil evidence fetch <领域> "<问题>" [--extended]      实时采集该领域必备维度证据（附 source URL + 抓取时间戳；--extended 含加密/股指源）
   vigil domains                  列出所有支持的决策领域（衣食住行/工作/购物/旅行/融资/医疗/教育…）
   vigil decide <文件.json|->     请求裁决，结果写入账本
+  vigil ask "<自然语言目标>" [--domain <领域>] [--gather] [--extended]   用一句话发起决策：自动识别领域→实时采集→证据驱动裁决→确认闸门→闭环（配置 VIGIL_SEARCH_URL 后政策/专家/风险等维度自动补抓）
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
   vigil hook claude [--shadow]  作为 Claude Code 的 PreToolUse 钩子运行
   vigil ledger [--json]          列出全部决策
@@ -947,6 +971,93 @@ async function main(): Promise<void> {
       return;
     }
 
+    case 'ask': {
+      // vigil ask "<自然语言目标>" [--domain <领域>] [--gather] [--extended] [--auto-confirm]
+      const domainIdx = rest.indexOf('--domain');
+      const domainArg = domainIdx >= 0 ? rest[domainIdx + 1] : undefined;
+      const question = rest
+        .filter((a) => !a.startsWith('--') && a !== domainArg)
+        .join(' ')
+        .trim()
+        .replace(/^"|"$/g, '');
+      if (!question) {
+        throw new Error('用法：vigil ask "<自然语言目标>" [--domain <领域>] [--gather] [--extended]');
+      }
+      const domain = domainArg ?? detectDomain(question);
+      const spec = resolveDomainSpec(domain);
+      const kernel = buildKernel(
+        { ...currentPolicy(), moneyCapPerAction: Number.MAX_SAFE_INTEGER },
+        packRules(),
+      );
+
+      const notifiers = buildNotifiers();
+      const notifier: Notifier | undefined =
+        notifiers.length > 1 ? new MultiNotifier(notifiers) : notifiers[0];
+      const executor = buildExecutor();
+
+      const extendedFlag = rest.includes('--extended') || !!process.env.VIGIL_EXTENDED_SOURCES;
+      const searchUrl = process.env.VIGIL_SEARCH_URL;
+      const sources = buildSources({ extended: extendedFlag, searchUrl });
+      const autoConfirm = rest.includes('--auto-confirm');
+      const gatherFlag = rest.includes('--gather') || !rest.includes('--no-gather');
+
+      let evidence: ChannelEvidence[] = [];
+      if (gatherFlag) {
+        process.stdout.write(`\n[实时采集] 识别领域=${domain}（${spec.required.join('/')}），正在抓取证据…\n`);
+        const g = await gatherEvidence(spec, question, domain, sources, {
+          existing: [],
+          extended: extendedFlag,
+        });
+        evidence = g.evidence;
+        process.stdout.write(
+          `[实时采集] 已实时核验：${g.gathered.join(' / ') || '（无）'}；` +
+            `未核验：${g.unverified.join(' / ') || '（无）'}\n`,
+        );
+      }
+
+      const goal: LoopGoal = {
+        sessionId: `sess_decide_${Date.now().toString(36)}`,
+        question,
+        action: {
+          kind: 'decide',
+          actor: 'user',
+          type: 'generic_decision',
+          target: question,
+          reversible: true,
+          external: false,
+          rationale: question,
+        },
+        positions: [
+          {
+            actor: 'vigil',
+            authority: 1,
+            conclusion: 'allow',
+            reason: '系统依据已核验证据生成决策简报（见 reasoning 阶段），交由确认闸门/裁决定夺',
+          },
+        ],
+        evidence,
+        evidenceSpec: spec,
+        domain,
+        autoConfirm,
+      };
+
+      const vigilDir = process.env.VIGIL_DIR ?? '.vigil';
+      const sink = (event: LoopEvent): void => {
+        const t = event.ts.slice(11, 19);
+        const icon = event.level === 'alert' ? '🔔' : event.level === 'gate' ? '⏸' : '·';
+        process.stdout.write(`[${t}] ${icon} ${event.message}\n`);
+      };
+      const loop = new DecisionLoop(kernel, goal, vigilDir, undefined, notifier, executor);
+      loop.on(sink);
+      const final = await loop.run();
+      process.stdout.write(`\n循环 ID：${loop.loopId}\n`);
+      process.stdout.write(`循环状态：${final.status}\n`);
+      if (final.status === 'awaiting_confirmation') {
+        process.stdout.write(`⏸ 已挂起等待你确认。恢复：vigil loop --resume ${loop.loopId} --confirm\n`);
+      }
+      return;
+    }
+
     case 'evidence': {
       // vigil evidence fetch <domain> "<question>" [--extended]
       const sub = rest[0];
@@ -956,7 +1067,7 @@ async function main(): Promise<void> {
       if (!domainKey || !question) throw new Error('用法：vigil evidence fetch <domain> "<问题>" [--extended]');
       const spec = resolveDomainSpec(domainKey);
       const extended = rest.includes('--extended') || !!process.env.VIGIL_EXTENDED_SOURCES;
-      const result = await gatherEvidence(spec, question, domainKey, defaultSources(), { extended });
+      const result = await gatherEvidence(spec, question, domainKey, buildSources({ extended }), { extended });
       process.stdout.write(`实时证据采集（领域=${domainKey}，问题="${question}"${extended ? '，含扩展源(加密/股指)' : ''}）\n`);
       process.stdout.write(`已实时核验：${result.gathered.join(' / ') || '（无）'}\n`);
       process.stdout.write(`未核验（需人工/搜索补充）：${result.unverified.join(' / ') || '（无）'}\n`);
@@ -970,6 +1081,8 @@ async function main(): Promise<void> {
       const autoConfirm = rest.includes('--auto-confirm');
       const gatherFlag = rest.includes('--gather');
       const extendedFlag = rest.includes('--extended') || !!process.env.VIGIL_EXTENDED_SOURCES;
+      const searchUrl = process.env.VIGIL_SEARCH_URL;
+      const sources = buildSources({ extended: extendedFlag, searchUrl });
       const vigilDir = process.env.VIGIL_DIR ?? '.vigil';
       // 决策循环里，金钱动作的授权由"确认闸门"统一接管（human-in-the-loop），
       // 因此内核的单笔金额上限在此放开到极大，避免自主花费护栏误杀本应交付给人工确认的高额决策。
@@ -1047,7 +1160,7 @@ async function main(): Promise<void> {
           spec,
           parsed.question ?? file ?? '',
           domainKey,
-          defaultSources(),
+          sources,
           {
             existing: Array.isArray(parsed.evidence) ? parsed.evidence : [],
             extended: extendedFlag,

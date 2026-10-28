@@ -240,7 +240,7 @@ vigil loop --resume lp_xxxx --confirm
 `src/loop/reasoning.ts` 的 `buildBrief()` 在完整性闸门放行后、仲裁之前运行，把已核验的金融证据按**透明规则**转成一份可复核的配置方案（`DecisionBrief`）：
 
 - `invest` / `financing` 领域：实时信号 → 具体仓位（债券随 10Y 收益率在 15/25/35% 三档浮动、权益取到实时标普给 30% 否则降到 20% 转现金、黄金 15% / 白银 5% 对冲、比特币仅取到实时价才给 5% 卫星仓、现金补足到 100%），每一条都引用实时数值 + 时间戳。
-- 非金融领域（医疗 / 教育 / 购物…）：不编造配置，只输出「已核验证据摘要」作为裁决依据。
+- **非金融领域（医疗 / 教育 / 工作 / 购物 / 旅行 / 购房…）也真决策**：当证据按 `option` 标签分组（≥2 个方案）时，生成**多方案决策矩阵**——每个方案在必备维度上的「证据完整度 × 风险红牌」排序，给出推荐方案与诚实警示。排名规则透明：`score = 证据完整度(0~1) − (明确风险红牌 ? 0.4 : 0)`；风险维度缺失（未评估）给温和惩罚 0.15；风险证据含「风险/红牌/失败/拒/极低…」关键词才计为红牌，避免"已评估风险=有风险"的误判。单方案 / 无方案时退化为证据摘要，不编造。
 - **诚实边界**：抓不到的行情，对应仓位下调 / 移除并明确警示、置信度降级（实时信号 5/6→high、3-4→medium、<3→low），绝不填数字假装算过。
 
 `DecisionBrief` 随后被 emit 为 `reasoning` 事件（实时可见）、透传进仲裁账本（`extras.decisionBrief`）、写入循环状态、并在确认后随执行上下文发给券商端点（`payload.decisionBrief`）。
@@ -252,6 +252,33 @@ node src/cli.ts loop examples/goal-invest-200k-demo.json --gather --extended
 # [reasoning] 建议配置（合计 100%）：美国10年期国债 35% / 标普500指数 20% / 现货黄金 15% / 现货白银 5% / 现金(美元) 25%
 # [reasoning] 置信度：low   ⚠ 未取到实时标普/加密行情，仓位已下调（沙箱内部分源不可达，公网可正常抓取）
 ```
+
+### 统一入口 `vigil ask`：用一句话发起决策
+
+不用再手搓 `goal.json`。一句话描述目标，系统自动**识别领域 → 实时采集证据 → 证据驱动裁决 → 确认闸门 → 闭环**：
+
+```bash
+# 自然语言 → 自动识别为 invest 领域 → 实时抓 FX/黄金/白银/10Y → 生成配置方案
+vigil ask "帮我配置20万美金做全球分散投资，股债黄金都要" --gather --extended
+# 自然语言 → 自动识别为 education 领域 → 若证据不全则诚实 blocked（见 goal-edu-daughter.json 演示完整矩阵）
+
+# 识别不出时用 --domain 强制指定；配置 VIGIL_SEARCH_URL 后，政策/专家/风险等维度自动补抓
+vigil ask "女儿专升本还是竞赛免试升本科" --domain education --gather
+```
+
+领域识别为关键词匹配（投资/融资/医疗/教育/旅行/工作/购房/购物），命中第一个即返回；也可用 `--domain <领域>` 绕过。
+
+### 搜索源接真后端（让"证据自己跑"覆盖政策/专家/风险）
+
+机读维度（汇率/贵金属/国债/行情）已实时真抓；政策、专家、风险、替代等**非机读维度**默认无后端、`canServe=false`、保持未核验交由闸门拦截。配置真实搜索后端后，这些维度也能自动补抓：
+
+```bash
+# 设置一个接受 POST { query, dimension }、返回 { answer | snippet } 的搜索代理 / 向量库 / 爬虫
+export VIGIL_SEARCH_URL=https://your-search.example.com/query
+vigil ask "女儿专升本还是竞赛免试升本科" --gather   # 政策/专家/风险维度自动补抓
+```
+
+未配置时该系统**绝不假核验**——相关维度保持未核验，由完整性闸门拦截。
 
 ### 实跑：买 MacBook Neo（预算 4000，旧机不卖）
 
@@ -286,7 +313,7 @@ node src/cli.ts loop --watch lp_xxxx
 }
 ```
 
-测试覆盖：`npm test` 已含 `tests/loop.test.ts`（决策循环 / 领域注册表 / 完整性 / 未核验阻塞 / 事件落盘 / 闸门挂起 / deny 不可被执行 / resume 确认·未确认 / autoConfirm / 可逆动作自动放行）、`tests/evidenceProvider.test.ts`（实时源与采集编排）、`tests/reasoning.test.ts`（证据驱动裁决：债券随 10Y 浮动、缺失行情诚实降级、置信度分级、非金融领域不编造配置）与 `tests/decisionSystem.test.ts`（真实数据源多路采集、推送通道企微/邮件/webhook、执行适配器 dry-run/webhook、确认闸门放行后才触发、brief 进入循环状态并随执行 payload 传递的集成测试）。
+测试覆盖：`npm test` 已含 `tests/loop.test.ts`（决策循环 / 领域注册表 / 完整性 / 未核验阻塞 / 事件落盘 / 闸门挂起 / deny 不可被执行 / resume 确认·未确认 / autoConfirm / 可逆动作自动放行）、`tests/evidenceProvider.test.ts`（实时源与采集编排）、`tests/reasoning.test.ts`（证据驱动裁决：债券随 10Y 浮动、缺失行情诚实降级、置信度分级、非金融多方案决策矩阵按完整度×风险红牌排序、风险红牌关键词判定、HttpSearchSource 接后端、无后端诚实不假核验）与 `tests/decisionSystem.test.ts`（真实数据源多路采集、推送通道企微/邮件/webhook、执行适配器 dry-run/webhook、确认闸门放行后才触发、brief 进入循环状态并随执行 payload 传递的集成测试）。
 
 ## 快速开始
 
@@ -674,6 +701,14 @@ SQLite 后端用 WAL 模式 + `BEGIN IMMEDIATE`：写锁排队而不是报错，
 - [x] 冲突仲裁 `Arbiter`：证据与权级定夺，未被驳倒的否决立场绝不放行
 - [x] 规则包（声明式 JSON，4 个内置行业包，可安装可校验）
 - [x] 存储层换 SQLite（node:sqlite 内置，多进程并发写，哈希链语义不变）
+- [x] 决策循环 DecisionLoop：实时事件总线 + 证据完整性闸门 + 确认闸门(HITL) + 可暂停续跑
+- [x] 决策领域注册表：衣食住行 / 工作 / 购物 / 旅行 / 融资 / 投资 / 医疗 / 教育（新增领域往 `DECISION_DOMAINS` 加一项即生效）
+- [x] 证据驱动裁决 Reasoning：金融实时信号 → 具体仓位；非金融证据 → 多方案决策矩阵（完整度 × 风险红牌排序）
+- [x] 实时证据采集层：汇率 / 黄金 / 白银 / 10Y 国债 / 加密 / 股指多源真抓（附 source+时间戳），抓不到诚实 blocked
+- [x] 推送通道 Notifier：企微 / 邮件 / 通用 webhook（拉→推，每次事件主动推送）
+- [x] 真实执行适配器 Executor：确认闸门放行后才触发（dry-run / webhook 两种），deny / 未确认绝不执行
+- [x] 统一入口 `vigil ask`：一句话自然语言 → 自动识别领域 → 实时采集 → 证据驱动裁决 → 闭环
+- [x] 搜索源接真后端：配置 `VIGIL_SEARCH_URL` 后政策 / 专家 / 风险等维度自动补抓（未配置诚实不假核验）
 - [x] GitHub 顶级 AI 项目 Top 50 调研（[报告](docs/ai-landscape-2026-10.md)）＋ MCP 协议合规与工具授权标注
 - [x] 竞品对标 ECC 实跑（[报告](docs/competitor-benchmark.md)）：多事件钩子、输出侧凭据检测、告警级规则、紧急制动
 - [x] 规则包索引与分发：指纹 + 签名 + 本地信任锚 + 只能收紧不放松

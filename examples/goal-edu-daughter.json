@@ -1,0 +1,124 @@
+{
+  "sessionId": "sess_edu_demo",
+  "question": "女儿就读湖南商务职业技术学院（数智营销专业，大专），本科升学走哪条路：专升本 还是 竞赛免试升本科？",
+  "domain": "education",
+  "evidenceSpec": "education",
+  "action": {
+    "kind": "decide",
+    "actor": "user",
+    "type": "generic_decision",
+    "target": "本科升学路径选择：专升本 vs 竞赛免试升本科",
+    "reversible": true,
+    "external": false,
+    "rationale": "为女儿选择最优本科升学路径"
+  },
+  "positions": [
+    {
+      "actor": "vigil",
+      "authority": 1,
+      "conclusion": "allow",
+      "reason": "系统依据已核验证据生成决策矩阵（见 reasoning 阶段），交由确认闸门/裁决定夺"
+    }
+  ],
+  "evidence": [
+    {
+      "dimension": "authoritative",
+      "channel": "hnsz-edu-policy",
+      "source": "湖南省教育考试院《湖南省普通高等教育专升本考试招生工作实施办法》",
+      "verified": true,
+      "option": "专升本",
+      "note": "湖南省专升本为统一考试入学，面向应届高职（专科）毕业生，需参加全省统考+院校专业测试",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "authoritative",
+      "channel": "hnsz-competition-policy",
+      "source": "教育部/湖南省职业院校技能大赛获奖免试专升本政策",
+      "verified": true,
+      "option": "竞赛免试升本科",
+      "note": "获省级以上职业院校技能大赛一等奖可免试入读本科（具体院校与专业以当年政策为准）",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "regulatory",
+      "channel": "admission-policy",
+      "source": "目标本科院校招生章程（以湖南省志愿填报系统公布为准）",
+      "verified": true,
+      "option": "专升本",
+      "note": "统招专升本录取后编入本科三年级，毕业发全日制本科证；第一学历为本科",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "regulatory",
+      "channel": "competition-quota",
+      "source": "免试专升本名额与对口本科院校目录（需逐年核对）",
+      "verified": true,
+      "option": "竞赛免试升本科",
+      "note": "免试通道名额有限、专业对口要求严，且政策逐年可能调整，存在不确定性",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "expert",
+      "channel": "counselor",
+      "source": "学校招生就业指导中心老师咨询",
+      "verified": true,
+      "option": "专升本",
+      "note": "老师评价：统招专升本路线稳定、可准备周期长（大三下考试），适合基础中等但肯学的同学",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "expert",
+      "channel": "competition-coach",
+      "source": "专业技能竞赛指导老师咨询",
+      "verified": true,
+      "option": "竞赛免试升本科",
+      "note": "竞赛指导老师评价：女儿数智营销专业对口『互联网+』/市场营销赛项，但需从大一持续备赛，淘汰率高",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "financial",
+      "channel": "cost",
+      "source": "两年本科学费+备考成本估算（湖南公办本科约 4000-8000 元/年）",
+      "verified": true,
+      "option": "专升本",
+      "note": "统招专升本：备考资料+培训约 3000-8000 元，本科学费约 0.8-1.6 万/两年",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "financial",
+      "channel": "cost",
+      "source": "竞赛备赛成本估算",
+      "verified": true,
+      "option": "竞赛免试升本科",
+      "note": "竞赛路线：报名/差旅/集训约 5000-1.5 万，但不确定性高，可能两手空空",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "alternative",
+      "channel": "alt-path",
+      "source": "自考本科/成人本科作为兜底",
+      "verified": true,
+      "option": "专升本",
+      "note": "若统招专升本失利，可考虑自考本科（非全日制）作为兜底，但含金量低于统招",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "alternative",
+      "channel": "alt-path",
+      "source": "直接就业/实习作为备选",
+      "verified": true,
+      "option": "竞赛免试升本科",
+      "note": "若竞赛未获奖，可凭大专学历+实习直接就业，数智营销岗位需求尚可",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "risk",
+      "channel": "risk-comp",
+      "source": "竞赛路线风险研判",
+      "verified": true,
+      "option": "竞赛免试升本科",
+      "note": "红牌：竞赛一等奖获奖率极低、政策逐年收紧，孤注一掷风险大；若大三才发现拿不到奖，已错过统招备考窗口",
+      "capturedAt": "2026-10-29"
+    }
+  ]
+}

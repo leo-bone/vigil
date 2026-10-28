@@ -345,6 +345,66 @@ export class SearchSource implements EvidenceSource {
   }
 }
 
+/**
+ * HTTP 搜索后端源：把"搜索类维度"交给一个真实的后端服务去取
+ * （你自己的搜索代理 / 向量库 / 爬虫 / LLM 工具端点均可，只需接受
+ *   POST { query, dimension }、返回 { answer | snippet } 的 JSON）。
+ *
+ * 配置方式：在 CLI 里通过 `VIGIL_SEARCH_URL=https://your-search.example.com/query` 启用；
+ * 未配置时此源不会进入采集（canServe=false），相关维度保持未核验，由闸门诚实拦截——
+ * 绝不因为"有个搜索框"就假装核验过了。
+ */
+export class HttpSearchSource implements EvidenceSource {
+  id = 'http-search';
+  private url: string;
+  private headers: Record<string, string>;
+  /** 该源负责的非机读维度 */
+  serves: SourceCapability[] = [
+    { dimension: 'authoritative', channel: 'http-search' },
+    { dimension: 'regulatory', channel: 'http-search' },
+    { dimension: 'expert', channel: 'http-search' },
+    { dimension: 'risk', channel: 'http-search' },
+    { dimension: 'alternative', channel: 'http-search' },
+  ];
+
+  constructor(url: string, headers: Record<string, string> = {}) {
+    this.url = url;
+    this.headers = headers;
+  }
+
+  canServe(q: EvidenceQuery): boolean {
+    return matches(this, q);
+  }
+
+  async fetch(q: EvidenceQuery): Promise<ChannelEvidence> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    let text: string;
+    try {
+      const res = await fetch(this.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...this.headers },
+        body: JSON.stringify({ query: `[${q.dimension}] ${q.question}`, dimension: q.dimension }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { answer?: string; snippet?: string };
+      text = (data.answer ?? data.snippet ?? JSON.stringify(data)).slice(0, 500);
+    } finally {
+      clearTimeout(timer);
+    }
+    const fetchedAt = new Date().toISOString();
+    return {
+      dimension: q.dimension,
+      channel: `http-search-${q.dimension}`,
+      source: `${this.url} (dim=${q.dimension}, fetched=${fetchedAt})`,
+      verified: true,
+      note: text,
+      capturedAt: fetchedAt,
+    };
+  }
+}
+
 /** 默认启用的实时源（无需 key、沙箱可达）：FX / 黄金 / 白银 / 国债。 */
 export function defaultSources(): EvidenceSource[] {
   return [
@@ -359,6 +419,23 @@ export function defaultSources(): EvidenceSource[] {
 /** 扩展实时源（公网可达、沙箱可能不可达，需显式开启）：加密资产 / 股指行情。 */
 export function extendedSources(): EvidenceSource[] {
   return [new CryptoSource(), new StockIndexSource()];
+}
+
+/**
+ * 组合采集源：默认源 + 可选扩展源 + 可选 HTTP 搜索后端（政策/专家/风险等维度）。
+ * 未配置 searchUrl 时，搜索类维度无后端 → 诚实保持未核验，由闸门拦截。
+ */
+export function buildSources(opts: { extended?: boolean; searchUrl?: string } = {}): EvidenceSource[] {
+  const sources: EvidenceSource[] = [
+    new FrankfurterFxSource(),
+    new ErApiFxSource(),
+    new GoldSource(),
+    new SilverSource(),
+    new TreasuryYieldSource(),
+  ];
+  if (opts.extended) sources.push(new CryptoSource(), new StockIndexSource());
+  if (opts.searchUrl) sources.push(new HttpSearchSource(opts.searchUrl));
+  return sources;
 }
 
 export interface GatherOptions {

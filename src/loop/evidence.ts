@@ -40,6 +40,8 @@ export interface ChannelEvidence {
   value?: number;
   /** 数值单位/标签（如 'USD/CNY'、'USD/oz'、'%'），与 value 配套 */
   unit?: string;
+  /** 该证据支持的可选方案标签（如「专升本」「竞赛免试升本科」），供多方案决策矩阵分组 */
+  option?: string;
 }
 
 export interface EvidenceSpec {

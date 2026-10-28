@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildBrief, type AllocationSlice } from '../src/loop/reasoning.ts';
+import { HttpSearchSource, SearchSource, NO_SEARCH } from '../src/loop/evidenceProvider.ts';
 import type { ChannelEvidence } from '../src/loop/evidence.ts';
 
 function ev(partial: Partial<ChannelEvidence> & { channel: string }): ChannelEvidence {
@@ -102,4 +103,117 @@ test('financing 领域复用投资配置逻辑', () => {
   const brief = buildBrief('financing', '理财配置', fullInvestEvidence());
   assert.equal(brief.kind, 'allocation');
   assert.equal(brief.totalWeightPct, 100);
+});
+
+// ---- 非金融领域：多方案决策矩阵（证据按 option 分组）----
+
+function dimEv(dimension: string, option: string, note = `${dimension} 证据`): ChannelEvidence {
+  return ev({ dimension: dimension as never, option, note, verified: true });
+}
+
+test('教育领域：两方案证据完整度不同 → 推荐完整度更高者', () => {
+  // education 必备维度：authoritative / expert / regulatory / financial / alternative / risk（6 个）
+  const evidence: ChannelEvidence[] = [
+    // 专升本：缺 risk 维度（5/6）
+    dimEv('authoritative', '专升本'),
+    dimEv('expert', '专升本'),
+    dimEv('regulatory', '专升本'),
+    dimEv('financial', '专升本'),
+    dimEv('alternative', '专升本'),
+    // 竞赛免试升本科：6/6 全
+    dimEv('authoritative', '竞赛免试升本科'),
+    dimEv('expert', '竞赛免试升本科'),
+    dimEv('regulatory', '竞赛免试升本科'),
+    dimEv('financial', '竞赛免试升本科'),
+    dimEv('alternative', '竞赛免试升本科'),
+    dimEv('risk', '竞赛免试升本科'),
+  ];
+  const brief = buildBrief('education', '升学路径', evidence);
+  assert.equal(brief.kind, 'matrix');
+  assert.equal(brief.options?.length, 2);
+  // 专升本 5/6 = 0.833（缺 risk → 温和惩罚 0.15），竞赛 6/6 全（无风险红牌）→ 竞赛胜出
+  assert.equal(brief.recommendedOption, '竞赛免试升本科');
+  const comp = brief.options?.find((o) => o.option === '竞赛免试升本科');
+  assert.equal(comp?.coverage, 1);
+  const ben = brief.options?.find((o) => o.option === '专升本');
+  assert.equal(ben?.coverage, 5 / 6);
+  assert.ok(brief.caveats.some((c) => c.includes('专升本') && c.includes('风险维度未评估')));
+});
+
+test('决策矩阵：有风险红牌的方案被降权', () => {
+  const evidence: ChannelEvidence[] = [
+    // A：6/6 全，但有风险红牌
+    dimEv('authoritative', 'A'),
+    dimEv('expert', 'A'),
+    dimEv('regulatory', 'A'),
+    dimEv('financial', 'A'),
+    dimEv('alternative', 'A'),
+    dimEv('risk', 'A', '红牌：该路径极不稳定'),
+    // B：5/6（缺 risk），无风险红牌
+    dimEv('authoritative', 'B'),
+    dimEv('expert', 'B'),
+    dimEv('regulatory', 'B'),
+    dimEv('financial', 'B'),
+    dimEv('alternative', 'B'),
+  ];
+  const brief = buildBrief('education', 'q', evidence);
+  assert.equal(brief.kind, 'matrix');
+  // A 完整度 1.0 但减 0.4 = 0.6；B 0.833 且无惩罚 → B 胜出
+  assert.equal(brief.recommendedOption, 'B');
+  const a = brief.options?.find((o) => o.option === 'A');
+  assert.equal(a?.riskFlags.length, 1);
+  assert.ok(brief.caveats.some((c) => c.includes('A') && c.includes('风险红牌')));
+});
+
+test('只有单一方案 → 退化 generic，不强行矩阵', () => {
+  const evidence = [dimEv('authoritative', '唯一方案'), dimEv('risk', '唯一方案')];
+  const brief = buildBrief('medical', 'q', evidence);
+  assert.equal(brief.kind, 'generic');
+  assert.equal(brief.options, undefined);
+});
+
+test('矩阵推荐结论写入 recommendation 且引用方案名', () => {
+  const evidence: ChannelEvidence[] = [
+    dimEv('authoritative', '方案甲'),
+    dimEv('expert', '方案甲'),
+    dimEv('regulatory', '方案甲'),
+    dimEv('financial', '方案甲'),
+    dimEv('alternative', '方案甲'),
+    dimEv('authoritative', '方案乙'),
+    dimEv('expert', '方案乙'),
+    dimEv('regulatory', '方案乙'),
+    dimEv('financial', '方案乙'),
+    dimEv('alternative', '方案乙'),
+    dimEv('risk', '方案乙'),
+  ];
+  const brief = buildBrief('work', 'q', evidence);
+  // 方案乙完整度 6/6（含风险已评估），方案甲缺 risk（温和惩罚）→ 乙胜出
+  assert.equal(brief.recommendedOption, '方案乙');
+  assert.ok(brief.recommendation.includes('方案乙'));
+});
+
+
+// ---- 搜索源 ----
+
+test('HttpSearchSource：POST 后端后返回已核验证据', async () => {
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, opts: unknown) => {
+    const o = opts as { method?: string; body?: string };
+    assert.equal(o.method, 'POST');
+    assert.ok((o.body ?? '').includes('regulatory'));
+    return new Response(JSON.stringify({ answer: '湖南省专升本政策要点：统招专升本为全日制本科' }), {
+      status: 200,
+    });
+  }) as unknown as typeof fetch;
+  const src = new HttpSearchSource('https://search.example.com/q');
+  assert.equal(src.canServe({ dimension: 'regulatory', domain: 'education', question: 'x' }), true);
+  const e = await src.fetch({ dimension: 'regulatory', domain: 'education', question: 'x' });
+  assert.equal(e.verified, true);
+  assert.ok(e.note.includes('湖南省专升本政策要点'));
+  globalThis.fetch = oldFetch;
+});
+
+test('SearchSource 无后端（NO_SEARCH）时 canServe=false，诚实不假核验', () => {
+  const src = new SearchSource(NO_SEARCH);
+  assert.equal(src.canServe({ dimension: 'regulatory', domain: 'education', question: 'x' }), false);
 });

@@ -232,6 +232,24 @@ vigil loop --resume lp_xxxx --confirm
 # → on confirm: gate lifts → WebhookExecutor POSTs your endpoint → returns external order id → completed
 ```
 
+### Evidence-driven decision (Reasoning): live data really drives the call
+
+`src/loop/reasoning.ts` `buildBrief()` runs after the completeness gate and before arbitration, turning verified evidence into a reviewable decision:
+
+- `invest` / `financing`: live signals → concrete allocation (bond 15/25/35% by 10Y yield, equity 30% if S&P live else 20% to cash, gold 15% / silver 5% hedge, BTC 5% satellite only if live, cash fills to 100%), every slice citing live value + timestamp.
+- **Non-finance (medical / education / work / shopping / travel / housing) also decides**: when evidence is grouped by `option` (≥2 options), it builds a **multi-option decision matrix** — ranks each option by `evidence completeness × risk red-flag` (`score = completeness(0~1) − (explicit risk flag ? 0.4 : 0)`; missing risk dimension → mild 0.15; a risk note counts as a red flag only if it matches `风险/红牌/失败/拒/极低…`). Single/no option falls back to an evidence summary — never fabricated.
+- **Honest floor**: unfetched quotes → weight down/removed with a warning, confidence downgraded (5/6→high, 3-4→medium, <3→low), never a made-up number.
+
+### Unified entry `vigil ask`: one sentence to start a decision
+
+No more hand-writing `goal.json`. Describe the goal in natural language; the system **auto-detects the domain → gathers live evidence → reasons → confirmation gate → closed loop**:
+
+```bash
+vigil ask "allocate 200k USD globally across stocks, bonds and gold" --gather --extended
+vigil ask "daughter: upgrade-via-exam vs competition-exempt undergrad" --domain education --gather
+# set VIGIL_SEARCH_URL to auto-fill policy/expert/risk dimensions; without it the system never fakes-verifies
+```
+
 ### Real run: buying a MacBook Neo (budget 4000, keep the old machine)
 
 ```bash
