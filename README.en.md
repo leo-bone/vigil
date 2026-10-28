@@ -170,6 +170,29 @@ goal_received → plan → evidence_gathered → [evidence_complete | evidence_g
              → completed
 ```
 
+### Live evidence gathering (Evidence Provider): let evidence fetch itself
+
+The completeness gate demands "real and complete" evidence. But evidence shouldn't be **hand-typed into goal.json forever** — the system should fetch machine-readable data itself, and for dimensions it can't fetch, **honestly mark them unverified and let the gate block**, never faking a "verified" stamp.
+
+- `src/loop/evidenceProvider.ts`: defines the `EvidenceSource` interface and `gatherEvidence` orchestrator; real sources like `FrankfurterFxSource` (ECB live FX, no key), plus an injectable `SearchSource` (`canServe=false` when no backend, leaving those dimensions unverified).
+- `vigil evidence fetch <domain> "<question>"`: gathers the domain's required-dimension evidence live, emitting JSON with source URLs + fetch timestamps.
+- `vigil loop <goal.json> --gather`: when evidence is empty or `--gather` is set, fills the gaps with live sources (keeps existing verified evidence) before running.
+
+```bash
+# Live-fetch invest evidence (FX really fetched; other dims honestly unverified)
+node src/cli.ts evidence fetch invest "allocate 200k USD globally"
+# → live-verified: financial (USD/CNY=6.6675, Frankfurter/ECB)
+# → unverified: authoritative / regulatory / risk / expert / alternative (need human/search)
+
+# Run --gather on an empty-evidence skeleton: FX fetched live, but 5 dims unverified → gate blocks (no fake decision)
+node src/cli.ts loop examples/goal-invest-200k-skeleton.json --gather
+
+# Full closed loop with all-dimensions-real goal (live FX + WebSearch-sourced)
+node src/cli.ts loop examples/goal-invest-200k-live.json
+```
+
+**Design floor**: machine-readable data (FX) is fetched live with source + timestamp; unfetchable dimensions are never faked-verified — the completeness gate blocks and forces human/search input.
+
 ### Real run: buying a MacBook Neo (budget 4000, keep the old machine)
 
 ```bash
@@ -188,7 +211,7 @@ node src/cli.ts loop --watch lp_xxxx
 
 Key correction: the first pass only checked online prices (5499) and misjudged "over-budget, deny." After adding the national subsidy 15% (4599→3909), education 3999, student subsidy + offline ~4030, **the post-subsidy actual payment is at or below 4000 — the budget constraint is satisfied** — which is exactly why the evidence-completeness gate exists.
 
-The same mechanism is verified on **non-purchase domains**: `examples/goal-medical.json` (elective coronary stent, 6 dimensions all verified → gate suspended → confirm → closed loop), `examples/goal-financing.json` (200k business loan, all financing dimensions covered and sales-pitch excluded → gate suspended → confirm → closed loop), and `examples/goal-invest-200k.json` (**$200K global diversified allocation**, all investing dimensions covered incl. China-resident cross-border compliance: Fed rate / FX controls / yields / valuation risk / asset-manager views / instrument comparison → arbitrate require_human → confirmation gate → closed loop emits allocation checklist). **This is not a "buy-a-laptop" tool — it's a general framework for clothing/food/housing/transport, work, shopping, travel, financing, investing, medical, and education.**
+The same mechanism is verified on **non-purchase domains**: `examples/goal-medical.json` (elective coronary stent, 6 dimensions all verified → gate suspended → confirm → closed loop), `examples/goal-financing.json` (200k business loan, all financing dimensions covered and sales-pitch excluded → gate suspended → confirm → closed loop), and `examples/goal-invest-200k-live.json` (**$200K global diversified allocation**, 6 dimensions really verified: live-fetched USD/CNY FX + WebSearch-sourced Fed rate / China cross-border compliance / valuation risk / asset-manager views / instrument comparison → arbitrate require_human → confirmation gate → closed loop emits allocation checklist). There is also `examples/goal-invest-200k-skeleton.json` to demo `--gather` honestly `blocked` on incomplete evidence. **This is not a "buy-a-laptop" tool — it's a general framework for clothing/food/housing/transport, work, shopping, travel, financing, investing, medical, and education.**
 
 ### `goal.json` shape
 
@@ -216,7 +239,7 @@ node examples/company.ts     # an AI company: orchestrator with four workers run
                              # covering send-back-for-rework, self-produced-self-verified exposed, false-completion stop-loss
 node examples/resumable.ts   # resumable orchestration loop: external agent acts as worker, runs across calls
 node examples/arbiter.ts     # conflict arbitration: four cases walk every level of the arbitration ladder
-npm test                     # 121 tests
+npm test                     # 129 tests
 ```
 
 `demo` prints: the verdict and reasoning at each step, the postmortem, confidence calibration, and alerts.
@@ -368,9 +391,10 @@ vigil trust list|add|remove        Trusted signing public keys (for pack verific
 vigil ledger-migrate <src> <dst.db>    Migrate an NDJSON ledger to SQLite (for concurrency)
 vigil scan [dir] --write      # scan agent capabilities and generate governance config (--write effective immediately)
 vigil arbitrate <file.json|->  Decide when multiple agents' conclusions conflict
-vigil loop <goal.json> [--auto-confirm]   Decision loop: live events + evidence-completeness gate + confirmation gate + closed-loop execution
+vigil loop <goal.json> [--auto-confirm] [--gather]   Decision loop: live events + evidence-completeness gate + confirmation gate + closed-loop execution (--gather fills evidence live)
 vigil loop --resume <id> [--confirm]      Resume from a suspended loop (executes the closed loop after confirmation)
 vigil loop --watch <id>           Replay a loop's event stream live
+vigil evidence fetch <domain> "<question>"   Live-gather the domain's required-dimension evidence (with source URL + fetch timestamp)
 vigil domains                  List all supported decision domains (clothing/food/housing/transport, work, shopping, travel, financing, medical, education…)
 vigil decide request.json     # or read from stdin: vigil decide -
 vigil ledger                  # list all decisions

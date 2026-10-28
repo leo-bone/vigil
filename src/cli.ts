@@ -25,6 +25,7 @@ import type { Position } from './pipeline/arbiter.ts';
 import { join } from 'node:path';
 import { DecisionLoop, loadLoopState, type LoopGoal } from './loop/decisionLoop.ts';
 import { resolveDomainSpec, listDomains, type EvidenceSpec } from './loop/evidence.ts';
+import { gatherEvidence, defaultSources } from './loop/evidenceProvider.ts';
 import { loadEventLog, type LoopEvent } from './loop/events.ts';
 import { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
 import { KILL_FILE, engageKill, readKillState, releaseKill } from './policy/killswitch.ts';
@@ -243,9 +244,10 @@ vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转�
   vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
   vigil arbitrate <文件.json|->    多 agent 结论冲突时定夺
-  vigil loop <goal.json> [--auto-confirm]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行
+  vigil loop <goal.json> [--auto-confirm] [--gather]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行（--gather 实时补抓证据）
   vigil loop --resume <id> [--confirm]      从挂起恢复（确认后闭环执行）
   vigil loop --watch <id>          实时回看某循环的事件流
+  vigil evidence fetch <领域> "<问题>"      实时采集该领域必备维度证据（附 source URL + 抓取时间戳）
   vigil domains                  列出所有支持的决策领域（衣食住行/工作/购物/旅行/融资/医疗/教育…）
   vigil decide <文件.json|->     请求裁决，结果写入账本
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
@@ -931,10 +933,27 @@ async function main(): Promise<void> {
       return;
     }
 
+    case 'evidence': {
+      // vigil evidence fetch <domain> "<question>"
+      const sub = rest[0];
+      if (sub !== 'fetch') throw new Error('用法：vigil evidence fetch <domain> "<问题>"');
+      const domainKey = rest[1];
+      const question = rest.slice(2).join(' ').replace(/^"|"$/g, '');
+      if (!domainKey || !question) throw new Error('用法：vigil evidence fetch <domain> "<问题>"');
+      const spec = resolveDomainSpec(domainKey);
+      const result = await gatherEvidence(spec, question, domainKey, defaultSources());
+      process.stdout.write(`实时证据采集（领域=${domainKey}，问题="${question}"）\n`);
+      process.stdout.write(`已实时核验：${result.gathered.join(' / ') || '（无）'}\n`);
+      process.stdout.write(`未核验（需人工/搜索补充）：${result.unverified.join(' / ') || '（无）'}\n`);
+      process.stdout.write(`\n${JSON.stringify({ domain: domainKey, evidence: result.evidence }, null, 2)}\n`);
+      return;
+    }
+
     case 'loop': {
       const file = rest.find((arg) => !arg.startsWith('--'));
       const confirmFlag = rest.includes('--confirm');
       const autoConfirm = rest.includes('--auto-confirm');
+      const gatherFlag = rest.includes('--gather');
       const vigilDir = process.env.VIGIL_DIR ?? '.vigil';
       // 决策循环里，金钱动作的授权由"确认闸门"统一接管（human-in-the-loop），
       // 因此内核的单笔金额上限在此放开到极大，避免自主花费护栏误杀本应交付给人工确认的高额决策。
@@ -983,6 +1002,12 @@ async function main(): Promise<void> {
         evidenceSpec?: EvidenceSpec | string;
       };
       let spec: EvidenceSpec;
+      const domainKey =
+        typeof parsed.evidenceSpec === 'string'
+          ? parsed.evidenceSpec
+          : parsed.evidenceSpec
+            ? 'custom'
+            : 'purchase';
       if (typeof parsed.evidenceSpec === 'string') {
         spec = resolveDomainSpec(parsed.evidenceSpec);
       } else if (parsed.evidenceSpec) {
@@ -991,6 +1016,24 @@ async function main(): Promise<void> {
         spec = resolveDomainSpec('purchase');
       }
       const goal: LoopGoal = { ...parsed, evidenceSpec: spec, autoConfirm };
+
+      // 实时证据采集：证据为空或显式 --gather 时，用实时源补抓（已核验的沿用既有）
+      if (gatherFlag || (Array.isArray(parsed.evidence) && parsed.evidence.length === 0)) {
+        process.stdout.write(`\n[实时采集] 正在抓取 ${domainKey} 领域证据…\n`);
+        const gatherRes = await gatherEvidence(
+          spec,
+          parsed.question ?? file ?? '',
+          domainKey,
+          defaultSources(),
+          { existing: Array.isArray(parsed.evidence) ? parsed.evidence : [] },
+        );
+        goal.evidence = gatherRes.evidence;
+        process.stdout.write(
+          `[实时采集] 已实时核验：${gatherRes.gathered.join(' / ') || '（无）'}；` +
+            `未核验：${gatherRes.unverified.join(' / ') || '（无）'}\n`,
+        );
+      }
+
       const loop = new DecisionLoop(kernel, goal, vigilDir);
       loop.on(sink);
       const final = await loop.run();

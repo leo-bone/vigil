@@ -170,6 +170,29 @@ goal_received → plan → evidence_gathered → [evidence_complete | evidence_g
              → completed
 ```
 
+### 实时证据采集（Evidence Provider）：让证据自己跑
+
+证据完整闸门要求"真实完整"。但证据不该永远是**人手填进 goal.json** —— 系统应当能自己抓取能机读的数据，抓不到的维度则**诚实标记未核验、交闸门拦截**，绝不编造"已核验"。
+
+- `src/loop/evidenceProvider.ts`：定义 `EvidenceSource` 接口与 `gatherEvidence` 编排器；`FrankfurterFxSource`（ECB 实时汇率，无需 key）等真源，以及可注入 `searchFn` 的 `SearchSource`（无后端时 `canServe=false`，相关维度保持未核验）。
+- `vigil evidence fetch <领域> "<问题>"`：实时采集该领域必备维度的证据，输出带 source URL + 抓取时间戳的 JSON。
+- `vigil loop <goal.json> --gather`：证据为空或显式 `--gather` 时，先用实时源补抓（已核验的沿用既有、只补缺失/未核验项）再跑循环。
+
+```bash
+# 实时抓取 invest 领域证据（汇率真抓，其余维度诚实标记未核验）
+node src/cli.ts evidence fetch invest "配置20万美金全球分散"
+# → 已实时核验：financial（USD/CNY=6.6675，Frankfurter/ECB）
+# → 未核验：authoritative / regulatory / risk / expert / alternative（需人工/搜索补充）
+
+# 用空证据骨架跑 --gather：live 抓到汇率，但其余 5 维未核验 → 闸门直接 blocked（不假决策）
+node src/cli.ts loop examples/goal-invest-200k-skeleton.json --gather
+
+# 用全维度真实核验的目标文件跑完整闭环（含实时 FX + WebSearch 来源）
+node src/cli.ts loop examples/goal-invest-200k-live.json
+```
+
+**设计底线**：能机读的（汇率）实时真抓、附来源与时间戳；抓不到的维度绝不假核验，由完整性闸门拦截，强制人工/搜索补充。
+
 ### 实跑：买 MacBook Neo（预算 4000，旧机不卖）
 
 ```bash
@@ -188,7 +211,7 @@ node src/cli.ts loop --watch lp_xxxx
 
 关键纠正：首轮只查线上价（5499）一度误判"超预算否决"。补全国补 15%（4599→3909）、教育 3999、学生补贴 + 线下 ~4030 之后，**补贴后实付压线或低于 4000，预算约束满足** —— 这正是"证据完整"闸门存在的意义。
 
-同一套机制已用**非购买领域**验证：`examples/goal-medical.json`（冠心病择期支架手术，6 维度全核验 → 闸门挂起 → 确认闭环）、`examples/goal-financing.json`（20 万经营贷，覆盖融资领域全维度且排除"推销方一面之词" → 闸门挂起 → 确认闭环）、`examples/goal-invest-200k.json`（**$200K 全球分散配置**，覆盖投资领域全维度含中国居民跨境合规：美联储利率 / 外汇管制 / 收益率 / 估值风险 / 资管建议 / 标的对比 → 仲裁 require_human → 确认闸门 → 闭环输出配置清单）。**决策系统不是"买电脑专用"，而是覆盖衣食住行、工作、购物、旅行、融资、投资、医疗、教育的通用框架。**
+同一套机制已用**非购买领域**验证：`examples/goal-medical.json`（冠心病择期支架手术，6 维度全核验 → 闸门挂起 → 确认闭环）、`examples/goal-financing.json`（20 万经营贷，覆盖融资领域全维度且排除"推销方一面之词" → 闸门挂起 → 确认闭环）、`examples/goal-invest-200k-live.json`（**$200K 全球分散配置**，6 维度真实核验：含实时抓取 USD/CNY 汇率 + 美联储利率 / 中国跨境合规 / 估值风险 / 资管建议 / 标的对比的 WebSearch 来源 → 仲裁 require_human → 确认闸门 → 闭环输出配置清单）。另有 `examples/goal-invest-200k-skeleton.json` 用于演示 `--gather` 在证据不全时诚实 `blocked`。**决策系统不是"买电脑专用"，而是覆盖衣食住行、工作、购物、旅行、融资、投资、医疗、教育的通用框架。**
 
 ### `goal.json` 形态
 
@@ -216,7 +239,7 @@ node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
 node examples/resumable.ts   # 可续跑统筹循环：外部 agent 扮演工人，跨调用跑完
 node examples/arbiter.ts     # 冲突仲裁：四个案例走完仲裁阶梯的每一级
-npm test                     # 121 个测试
+npm test                     # 129 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -376,9 +399,10 @@ vigil trust list|add|remove       信任的签名公钥（规则包验签用）
 vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
 vigil scan [目录] --write      # 扫描 agent 能力并生成治理配置（--write 立即生效）
 vigil arbitrate <文件.json|->  多 agent 结论冲突时定夺
-vigil loop <goal.json> [--auto-confirm]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行
+vigil loop <goal.json> [--auto-confirm] [--gather]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行（--gather 实时补抓证据）
 vigil loop --resume <id> [--confirm]      从挂起恢复（确认后闭环执行）
 vigil loop --watch <id>          实时回看某循环的事件流
+vigil evidence fetch <领域> "<问题>"      实时采集该领域必备维度证据（附 source URL + 抓取时间戳）
 vigil domains                  列出所有支持的决策领域（衣食住行/工作/购物/旅行/融资/医疗/教育…）
 vigil decide request.json     # 或从 stdin 读：vigil decide -
 vigil ledger                  # 列出所有决策

@@ -1,0 +1,65 @@
+{
+  "sessionId": "invest-200k-live-2026-10-28",
+  "question": "是否以 20 万美金（约 134 万人民币）做全球分散配置（股/债/黄金/加密/现金）",
+  "action": {
+    "kind": "allocate_investment",
+    "target": "20 万美金全球分散投资组合",
+    "reversible": false,
+    "external": true,
+    "moneyUsd": 200000
+  },
+  "positions": [
+    { "actor": "prudent-investor", "conclusion": "allow", "authority": 2, "reason": "分散化 + 留有现金弹药，符合长期配置纪律" },
+    { "actor": "risk-desk", "conclusion": "require_human", "authority": 3, "reason": "高额不可逆，需本人最终确认仓位与执行时点" }
+  ],
+  "evidenceSpec": "invest",
+  "costUsd": 200000,
+  "evidence": [
+    {
+      "channel": "authoritative",
+      "source": "https://www.federalreserve.gov/ (Policy Rate 3.75%-4.00%); https://www.stcn.com/article/detail/4247508.html",
+      "verified": true,
+      "note": "美联储联邦基金利率目标区间 3.75%-4.00%（2026-09 加息25bp，2023年来首次）；10/28 FOMC 市场预计按兵不动（>90%）；18/18 官员预计年内至少再加一次。PCE 通胀 3.4%（2026-08），高于2%目标。搜索于 2026-10-28。"
+    },
+    {
+      "channel": "regulatory",
+      "source": "https://www.zgxwzk.chinanews.com.cn/finance/2026-06-11/30574.shtml ; https://www.zhonglun.com/research/articles/56207.html",
+      "verified": true,
+      "note": "境内个人5万美元便利化额度仅限经常项目，不得用于境外证券投资；须走 QDII / 港股通 / 跨境理财通。2026-07-01《国务院关于对外投资的规定》收紧合规。QDII 累计额度 1761.69 亿美元(2026-04)。税务：居民个人境外所得(利息/股息/红利/财产转让)按20%申报，CRS 下可见。搜索于 2026-10-28。"
+    },
+    {
+      "channel": "financial",
+      "source": "https://api.frankfurter.app/latest?from=USD&to=CNY (date=2026-10-27)",
+      "verified": true,
+      "note": "实时汇率 USD/CNY=6.6675（Frankfurter/ECB 数据，由 vigil evidence fetch 于 2026-10-28 实时抓取）"
+    },
+    {
+      "channel": "risk",
+      "source": "https://streetstats.finance/markets/volatility ; https://www.home.saxo/content/articles/options/the-markdown-was-all-in-the-wings---options-brief---22-october-2026-22102026",
+      "verified": true,
+      "note": "VIX ~16.68-17.31（2026-10-21/22），低位；S&P500 ~7,712-7,757；30日实现波动 ~10.45%；MOVE(利率波动) ~101.7 偏高。黄金 ~$4,109，BTC ~$82,905。估值偏高、长端利率高(10Y~5.09%)，但即期波动平静。搜索于 2026-10-28。"
+    },
+    {
+      "channel": "expert",
+      "source": "https://www.stcn.com/article/detail/4247508.html (引 Bloomberg 经济学家 Anna Wang 等)",
+      "verified": true,
+      "note": "多数机构：分散配置、保留现金弹药、不追高估值；美联储官员(Waller)称仍可能加息，市场预计12月或再加。配置上普遍建议股债黄金加密卫星化、现金垫底。搜索于 2026-10-28。"
+    },
+    {
+      "channel": "alternative",
+      "source": "https://www.home.saxo/content/articles/options/the-markdown-was-all-in-the-wings---options-brief---22-october-2026-22102026 (rates/commodities)",
+      "verified": true,
+      "note": "替代标的：美债10Y收益率~5.09%(安全票息)、黄金~$4,109(对冲但处回撤-27% from ATH)、BTC~$83K(高波动卫星仓)、T-bills~4-5%(现金等价)。相较集中于单一美股，分散更稳。搜索于 2026-10-28。"
+    }
+  ],
+  "plan": [
+    "确认资金出境合规路径：通过 QDII 基金 / 港股通 / 跨境理财通 配置，不占用5万美元便利化额度，不触碰非法跨境券商",
+    "美股宽基 VOO/VTI 35% = $70K（估值偏高，分3批建仓不追高）",
+    "国际股 VEA/VWO 15% = $30K",
+    "美债/短债 BND/SGOV 20% = $40K（票息~5%，安全垫）",
+    "黄金 GLD/实物 10% = $20K（处回撤，逢低配置）",
+    "BTC 卫星仓 5% = $10K（高波动，上限5%）",
+    "现金/货基 15% = $30K（弹药+应急，等利率/估值更优再加）",
+    "税务：境外所得按20%申报，保留 CRS 下账户记录；每年复核配置再平衡"
+  ]
+}

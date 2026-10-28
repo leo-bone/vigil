@@ -1,0 +1,18 @@
+{
+  "sessionId": "invest-200k-skeleton-2026-10-28",
+  "question": "是否以 20 万美金（约 134 万人民币）做全球分散配置（股/债/黄金/加密/现金）",
+  "action": {
+    "kind": "allocate_investment",
+    "target": "20 万美金全球分散投资组合",
+    "reversible": false,
+    "external": true,
+    "moneyUsd": 200000
+  },
+  "positions": [
+    { "actor": "prudent-investor", "conclusion": "allow", "authority": 2, "reason": "分散化 + 留有现金弹药，符合长期配置纪律" },
+    { "actor": "risk-desk", "conclusion": "require_human", "authority": 3, "reason": "高额不可逆，需本人最终确认仓位与执行时点" }
+  ],
+  "evidenceSpec": "invest",
+  "costUsd": 200000,
+  "evidence": []
+}
