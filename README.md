@@ -155,6 +155,7 @@ Vigil 只向判断模型发送类型化问题（boolean / choice / score），�
 | 教育升学 | education | authoritative / expert / regulatory / financial / alternative / risk | — |
 | 旅行出行 | travel | authoritative / market / regulatory / risk / financial / alternative | — |
 | 融资理财 | financing | authoritative / regulatory / financial / risk / expert / alternative | market（推销方一面之词不算证据） |
+| 投资理财 | invest | authoritative / regulatory / financial / risk / expert / alternative | market（卖方推销 / 喊单不算证据） |
 | 求职职业 | work | authoritative / expert / financial / risk / alternative / regulatory | — |
 | 居住置业 | housing | authoritative / market / regulatory / financial / risk / alternative | — |
 
@@ -187,7 +188,7 @@ node src/cli.ts loop --watch lp_xxxx
 
 关键纠正：首轮只查线上价（5499）一度误判"超预算否决"。补全国补 15%（4599→3909）、教育 3999、学生补贴 + 线下 ~4030 之后，**补贴后实付压线或低于 4000，预算约束满足** —— 这正是"证据完整"闸门存在的意义。
 
-同一套机制已用**非购买领域**验证：`examples/goal-medical.json`（冠心病择期支架手术，6 维度全核验 → 闸门挂起 → 确认闭环）、`examples/goal-financing.json`（20 万经营贷，覆盖融资领域全维度且排除"推销方一面之词" → 闸门挂起 → 确认闭环）。**决策系统不是"买电脑专用"，而是覆盖衣食住行、工作、购物、旅行、融资、医疗、教育的通用框架。**
+同一套机制已用**非购买领域**验证：`examples/goal-medical.json`（冠心病择期支架手术，6 维度全核验 → 闸门挂起 → 确认闭环）、`examples/goal-financing.json`（20 万经营贷，覆盖融资领域全维度且排除"推销方一面之词" → 闸门挂起 → 确认闭环）、`examples/goal-invest-200k.json`（**$200K 全球分散配置**，覆盖投资领域全维度含中国居民跨境合规：美联储利率 / 外汇管制 / 收益率 / 估值风险 / 资管建议 / 标的对比 → 仲裁 require_human → 确认闸门 → 闭环输出配置清单）。**决策系统不是"买电脑专用"，而是覆盖衣食住行、工作、购物、旅行、融资、投资、医疗、教育的通用框架。**
 
 ### `goal.json` 形态
 
@@ -198,7 +199,7 @@ node src/cli.ts loop --watch lp_xxxx
   "action": { "kind": "purchase_laptop", "target": "...", "reversible": false, "external": true, "moneyUsd": 563 },
   "positions": [ /* 各立场（allow/deny/require_human）+ 证据 */ ],
   "evidence": [ /* 该领域必备维度，channel/priceRMB/verified */ ],
-  "evidenceSpec": "purchase"   // 领域 key：purchase / medical / education / travel / financing / work / housing
+  "evidenceSpec": "purchase"   // 领域 key：purchase / medical / education / travel / financing / invest / work / housing
 }
 ```
 

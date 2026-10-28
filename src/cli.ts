@@ -936,7 +936,12 @@ async function main(): Promise<void> {
       const confirmFlag = rest.includes('--confirm');
       const autoConfirm = rest.includes('--auto-confirm');
       const vigilDir = process.env.VIGIL_DIR ?? '.vigil';
-      const kernel = buildKernel({ ...currentPolicy(), moneyCapPerAction: 1000 }, packRules());
+      // 决策循环里，金钱动作的授权由"确认闸门"统一接管（human-in-the-loop），
+      // 因此内核的单笔金额上限在此放开到极大，避免自主花费护栏误杀本应交付给人工确认的高额决策。
+      const kernel = buildKernel(
+        { ...currentPolicy(), moneyCapPerAction: Number.MAX_SAFE_INTEGER },
+        packRules(),
+      );
 
       const sink = (event: LoopEvent): void => {
         const t = event.ts.slice(11, 19);

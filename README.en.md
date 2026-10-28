@@ -155,6 +155,7 @@ Registered domains (`vigil domains` to view):
 | Education | education | authoritative / expert / regulatory / financial / alternative / risk | — |
 | Travel | travel | authoritative / market / regulatory / risk / financial / alternative | — |
 | Financing | financing | authoritative / regulatory / financial / risk / expert / alternative | market (sales pitch doesn't count) |
+| Investing | invest | authoritative / regulatory / financial / risk / expert / alternative | market (sell-side / shilling doesn't count) |
 | Work | work | authoritative / expert / financial / risk / alternative / regulatory | — |
 | Housing | housing | authoritative / market / regulatory / financial / risk / alternative | — |
 
@@ -187,7 +188,7 @@ node src/cli.ts loop --watch lp_xxxx
 
 Key correction: the first pass only checked online prices (5499) and misjudged "over-budget, deny." After adding the national subsidy 15% (4599→3909), education 3999, student subsidy + offline ~4030, **the post-subsidy actual payment is at or below 4000 — the budget constraint is satisfied** — which is exactly why the evidence-completeness gate exists.
 
-The same mechanism is verified on **non-purchase domains**: `examples/goal-medical.json` (elective coronary stent, 6 dimensions all verified → gate suspended → confirm → closed loop) and `examples/goal-financing.json` (200k business loan, all financing dimensions covered and sales-pitch excluded → gate suspended → confirm → closed loop). **This is not a "buy-a-laptop" tool — it's a general framework for clothing/food/housing/transport, work, shopping, travel, financing, medical, and education.**
+The same mechanism is verified on **non-purchase domains**: `examples/goal-medical.json` (elective coronary stent, 6 dimensions all verified → gate suspended → confirm → closed loop), `examples/goal-financing.json` (200k business loan, all financing dimensions covered and sales-pitch excluded → gate suspended → confirm → closed loop), and `examples/goal-invest-200k.json` (**$200K global diversified allocation**, all investing dimensions covered incl. China-resident cross-border compliance: Fed rate / FX controls / yields / valuation risk / asset-manager views / instrument comparison → arbitrate require_human → confirmation gate → closed loop emits allocation checklist). **This is not a "buy-a-laptop" tool — it's a general framework for clothing/food/housing/transport, work, shopping, travel, financing, investing, medical, and education.**
 
 ### `goal.json` shape
 
@@ -198,7 +199,7 @@ The same mechanism is verified on **non-purchase domains**: `examples/goal-medic
   "action": { "kind": "purchase_laptop", "target": "...", "reversible": false, "external": true, "moneyUsd": 563 },
   "positions": [ /* each position (allow/deny/require_human) + evidence */ ],
   "evidence": [ /* required dimensions for that domain: channel/priceRMB/verified */ ],
-  "evidenceSpec": "purchase"   // domain key: purchase / medical / education / travel / financing / work / housing
+  "evidenceSpec": "purchase"   // domain key: purchase / medical / education / travel / financing / invest / work / housing
 }
 ```
 

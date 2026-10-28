@@ -108,6 +108,12 @@ export const DECISION_DOMAINS: Record<string, DomainSpec> = {
     required: ['authoritative', 'regulatory', 'financial', 'risk', 'expert', 'alternative'],
     excludeHint: ['market'], // 推销方一面之词不算证据
   },
+  invest: {
+    label: '投资理财',
+    description: '一次性或定投配置：股 / 债 / 黄金 / 加密 / 现金等标的筛选与仓位',
+    required: ['authoritative', 'regulatory', 'financial', 'risk', 'expert', 'alternative'],
+    excludeHint: ['market'], // 卖方推销 / 喊单不算证据，只看独立行情与权威数据
+  },
   work: {
     label: '求职职业',
     description: 'Offer / 跳槽 / 创业 / 职业发展',

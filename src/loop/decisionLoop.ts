@@ -25,6 +25,8 @@ export interface LoopGoal {
   evidence: ChannelEvidence[];
   evidenceSpec: EvidenceSpec;
   costUsd?: number;
+  /** 闭环执行清单（dry-run 输出）；缺省时打印通用三步 */
+  plan?: string[];
   /** 演示用：预先授权金钱动作；真实场景应为 false，由闸门拦截 */
   autoConfirm?: boolean;
 }
@@ -214,15 +216,22 @@ export class DecisionLoop {
 
   async #execute(): Promise<void> {
     this.#bus.emit('executing', 'info', '执行闭环（dry-run，不发生真实交易）：');
-    const steps = [
-      '比对国补 / 教育 / 学生补贴渠道的当前最优价',
-      '锁定满足 ≤4000 预算的渠道',
-      '生成下单步骤与凭据清单（待你最终点确认后真实提交）',
-    ];
+    const steps =
+      this.#goal.plan && this.#goal.plan.length > 0
+        ? this.#goal.plan
+        : [
+            '比对已核验证据中的最优选项',
+            '锁定满足约束的选项',
+            '生成执行清单与凭据（待你最终点确认后真实提交）',
+          ];
     for (const step of steps) {
       this.#bus.emit('executing', 'info', `  → ${step}`);
     }
-    this.#bus.emit('completed', 'info', '✓ 闭环执行完成（dry-run）。真实购买需你最终点确认。');
+    this.#bus.emit(
+      'completed',
+      'info',
+      '✓ 闭环执行完成（dry-run）。真实下单/划转需你最终点确认。',
+    );
     this.#status = 'completed';
     this.#saveState();
   }

@@ -23,12 +23,15 @@ import {
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'vigil-loop-'));
 
-/** 与 cli.ts 中真实循环一致的配置：抬高金钱上限，让"补贴后压线成交"不被内核红线误杀 */
+/**
+ * 与 cli.ts 中真实循环一致的配置：决策循环里金钱动作的授权由"确认闸门"接管，
+ * 因此内核单笔金额上限在此放开到极大（与生产一致），避免自主花费护栏误杀本应交付人工确认的高额决策。
+ */
 function loopKernel() {
   return new Kernel({
     ledger: new Ledger(':memory:'),
     judge: new MockJudge({ fixed: { proceed: 0.9 }, latencyMs: 0 }),
-    policy: defaultPolicy({ moneyCapPerAction: 1000 }),
+    policy: defaultPolicy({ moneyCapPerAction: Number.MAX_SAFE_INTEGER }),
   });
 }
 
@@ -220,19 +223,92 @@ test('决策循环：非对外或非不可逆动作不触发确认闸门（自�
 
 test('决策循环：已被否决（deny）的循环，--resume --confirm 也绝不会执行', async () => {
   const dir = tmp();
-  // 动作金额超过循环内核的 per-action 上限 → 内核硬规则否决
+  // 用低金额上限内核制造一次真实的"内核否决"（生产循环内核放开上限，此处专属复现 deny）
+  const denyKernel = new Kernel({
+    ledger: new Ledger(':memory:'),
+    judge: new MockJudge({ fixed: { proceed: 0.9 }, latencyMs: 0 }),
+    policy: defaultPolicy({ moneyCapPerAction: 1000 }),
+  });
   const goal = gatedGoal({
     action: { kind: 'take_loan', target: '超额贷款', reversible: false, external: true, moneyUsd: 5000 },
   });
-  const loop = new DecisionLoop(loopKernel(), goal, dir);
+  const loop = new DecisionLoop(denyKernel, goal, dir);
   const first = await loop.run();
   assert.equal(first.status, 'completed');
   assert.equal(first.outcome, 'deny');
   const id = loop.loopId;
   // 即使误调用 --resume --confirm，也必须拒绝执行
   const state = loadLoopState(dir, id)!;
-  const resumed = new DecisionLoop(loopKernel(), state.goal, dir, id);
+  const resumed = new DecisionLoop(denyKernel, state.goal, dir, id);
   const final = await resumed.resume(true);
   assert.equal(final.status, 'completed');
   assert.equal(final.outcome, 'deny');
+});
+
+test('决策领域：invest 注册并强制其必备证据维度（权威/监管/财务/风险/专家/替代）', () => {
+  const spec = resolveDomainSpec('invest');
+  for (const dim of ['authoritative', 'regulatory', 'financial', 'risk', 'expert', 'alternative']) {
+    assert.ok(spec.required.includes(dim as never), `invest 应要求 ${dim}`);
+  }
+  assert.ok(spec.excludeHint?.includes('market'), 'invest 应排除卖方推销 market 维度');
+  // 缺任一必备维度即 incomplete
+  const partial = [
+    { channel: 'authoritative', source: '美联储', verified: true },
+    { channel: 'regulatory', source: '外汇管制', verified: true },
+    { channel: 'financial', source: '收益率', verified: true },
+    { channel: 'risk', source: '波动', verified: true },
+    { channel: 'expert', source: '资管建议', verified: true },
+  ] as ChannelEvidence[];
+  assert.equal(checkCompleteness(partial, spec, { requireVerified: true }).complete, false);
+});
+
+test('决策循环：invest 领域目标跑通 证据门→仲裁→确认闸门→闭环执行(plan 输出)', async () => {
+  const dir = tmp();
+  const INVEST = resolveDomainSpec('invest');
+  const goal: LoopGoal = {
+    sessionId: 'invest-200k-test',
+    question: '是否按股50%/债20%/黄金10%/BTC5%/现金15%配置 $200K',
+    action: {
+      kind: 'allocate_invest_lump_sum',
+      target: '全球分散配置 $200,000',
+      reversible: false,
+      external: true,
+      moneyUsd: 200000,
+    },
+    positions: [
+      { actor: 'core', conclusion: 'allow', authority: 1, reason: '分散配置可执行' },
+      { actor: 'risk', conclusion: 'require_human', authority: 2, reason: '跨境合规待确认' },
+    ],
+    evidence: [
+      { channel: 'authoritative', source: '美联储利率 3.75-4.00%', verified: true },
+      { channel: 'regulatory', source: 'QDII/港股通合规通道', verified: true },
+      { channel: 'financial', source: '10Y 收益率 ~5.10%', verified: true },
+      { channel: 'risk', source: '标普波动 12-15%', verified: true },
+      { channel: 'expert', source: '资管分散配置建议', verified: true },
+      { channel: 'alternative', source: '股/债/黄金/现金横向对比', verified: true },
+    ],
+    evidenceSpec: INVEST,
+    costUsd: 200000,
+    plan: [
+      '核对资金通道（境外账户直投 / 国内走 QDII）',
+      '建仓：先债+现金，再股，后黄金与 BTC 卫星仓',
+      '留存凭证并按 20% 申报境外所得',
+    ],
+  };
+  const loop = new DecisionLoop(loopKernel(), goal, dir);
+  const events: LoopEvent[] = [];
+  loop.on((e) => events.push(e));
+  const first = await loop.run();
+  assert.equal(first.status, 'awaiting_confirmation');
+  // 闭环执行时应当输出 plan 中的步骤
+  const id = loop.loopId;
+  const state = loadLoopState(dir, id)!;
+  const resumed = new DecisionLoop(loopKernel(), state.goal, dir, id);
+  const finalEvents: LoopEvent[] = [];
+  resumed.on((e) => finalEvents.push(e));
+  await resumed.resume(true);
+  assert.ok(
+    finalEvents.some((e) => e.stage === 'executing' && String(e.message).includes('核对资金通道')),
+    '闭环执行应输出 goal.plan 中的配置步骤',
+  );
 });
