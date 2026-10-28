@@ -93,6 +93,23 @@ export {
 export type { RulePack, DeclarativeRule } from './policy/pack.ts';
 export { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
 export { detectSecrets, hasSecret, describeSecrets } from './policy/secrets.ts';
+export {
+  INDEX_FILENAME,
+  buildIndexEntry,
+  canonicalPack,
+  fetchPack,
+  installFromIndex,
+  packDigest,
+  publishToIndex,
+  readIndex,
+  searchIndex,
+  verifyPack,
+  writeIndex,
+} from './policy/registry.ts';
+export type { PackIndex, PackIndexEntry, VerifyResult } from './policy/registry.ts';
+export { doctor, init, findClaudeSettings } from './policy/doctor.ts';
+export type { CheckResult, DoctorOptions, InitResult } from './policy/doctor.ts';
+export { engageKill, readKillState, releaseKill, KILL_FILE } from './policy/killswitch.ts';
 export type { SecretFinding } from './policy/secrets.ts';
 export { classifyToolCall, buildQuestions, resolveSessionId, analyzeShell } from './hook/mapping.ts';
 export type { Classification, HookPayload, ShellRisk } from './hook/mapping.ts';

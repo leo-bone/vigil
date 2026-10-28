@@ -148,14 +148,30 @@ export function mergePackPolicy(base: PolicyContext, pack: RulePack): PolicyCont
     merged.denylistTargets = [...new Set([...base.denylistTargets, ...patch.denylistTargets])];
   }
   if (patch.grants) {
+    // 授权只能收紧，不能提升。规则包是"别人写的东西"，
+    // 绝不能靠它给自己或别人发更高的权限。
     const byActor = new Map(base.grants.map((grant) => [grant.actor, grant]));
-    for (const grant of patch.grants) byActor.set(grant.actor, grant);
+    for (const grant of patch.grants) {
+      const existing = byActor.get(grant.actor);
+      // 没有基线授权的 actor，不允许包来凭空授权
+      if (!existing) continue;
+      byActor.set(grant.actor, {
+        actor: grant.actor,
+        authority: Math.min(existing.authority, grant.authority) as typeof existing.authority,
+      });
+    }
     merged.grants = [...byActor.values()];
   }
-  if (patch.moneyCapPerAction !== undefined) merged.moneyCapPerAction = patch.moneyCapPerAction;
-  if (patch.moneyCapPerSession !== undefined) merged.moneyCapPerSession = patch.moneyCapPerSession;
+  // 金额上限只能往严的方向走：包可以把 50 改成 0，但不能把 0 改成 500
+  if (patch.moneyCapPerAction !== undefined) {
+    merged.moneyCapPerAction = Math.min(base.moneyCapPerAction, patch.moneyCapPerAction);
+  }
+  if (patch.moneyCapPerSession !== undefined) {
+    merged.moneyCapPerSession = Math.min(base.moneyCapPerSession, patch.moneyCapPerSession);
+  }
   if (patch.allowAutonomousIrreversible !== undefined) {
-    merged.allowAutonomousIrreversible = patch.allowAutonomousIrreversible;
+    // 只允许从"允许"改成"不允许"，反向不行
+    merged.allowAutonomousIrreversible = base.allowAutonomousIrreversible && patch.allowAutonomousIrreversible;
   }
   return merged;
 }

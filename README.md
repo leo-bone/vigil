@@ -121,7 +121,7 @@ node examples/company.ts     # 一家 AI 公司：统筹助理带四名工人跑
                              # 覆盖退回重做、自产自验被识破、虚假完成止损
 node examples/resumable.ts   # 可续跑统筹循环：外部 agent 扮演工人，跨调用跑完
 node examples/arbiter.ts     # 冲突仲裁：四个案例走完仲裁阶梯的每一级
-npm test                     # 100 个测试
+npm test                     # 108 个测试
 ```
 
 `demo` 会打印：每一步的裁决与理由、事后梳理、置信度校准、预警。
@@ -187,6 +187,23 @@ vigil rules install healthcare.patient-data   # 安装，下次启动生效
 
 内置四个行业包：医疗患者数据、付款审批、多租户隔离、代码发布。
 完整格式见 [`docs/rule-packs.md`](docs/rule-packs.md)。
+
+**可分发，也因此可被攻击。** 包一旦能从别人那儿下载进来，
+"别人写的东西"就能进你的决策链路。四道防线：
+
+| 防线 | 做什么 |
+|---|---|
+| **指纹** | 索引记内容的 sha256，装之前必须对上 |
+| **签名** | 有签名的包要验签；没签名的会明确警告"没人给它背书" |
+| **信任锚在本地** | 索引自带的公钥**不算数** —— 能改索引就能换掉公钥和签名一起伪造。公钥必须由你显式信任（`vigil trust add`） |
+| **只能收紧不能放松** | 包的策略补丁只能压低金额上限、加长禁止清单、**降低**授权。装一个恶意包放宽不了你的任何一项防护 |
+
+```bash
+vigil rules publish my-pack.json --sign   # 登记进索引并签名
+vigil rules search 医疗                     # 检索
+vigil rules install healthcare.patient-data # 从索引装（先过指纹与签名）
+vigil trust add signer.pem 某医院           # 信任签名者的公钥
+```
 
 | 特性 | 为什么这么定 |
 |---|---|
@@ -259,7 +276,8 @@ vigil run -- npm test          # 退出码 0，正常执行
 vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转人工
 vigil unkill                       解除紧急制动
 vigil status                       当前账本与制动状态一览
-vigil rules list|show|check|install   规则包：查看、校验、安装
+vigil rules list|show|check|install|search|publish|verify   规则包：查看、校验、安装、检索、登记
+vigil trust list|add|remove       信任的签名公钥（规则包验签用）
 vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
 vigil scan [目录] --write      # 扫描 agent 能力并生成治理配置（--write 立即生效）
 vigil arbitrate <文件.json|->  多 agent 结论冲突时定夺
@@ -475,7 +493,8 @@ SQLite 后端用 WAL 模式 + `BEGIN IMMEDIATE`：写锁排队而不是报错，
 - [x] 存储层换 SQLite（node:sqlite 内置，多进程并发写，哈希链语义不变）
 - [x] GitHub 顶级 AI 项目 Top 50 调研（[报告](docs/ai-landscape-2026-10.md)）＋ MCP 协议合规与工具授权标注
 - [x] 竞品对标 ECC 实跑（[报告](docs/competitor-benchmark.md)）：多事件钩子、输出侧凭据检测、告警级规则、紧急制动
-- [ ] 规则包索引与分发：把格式变成可发现、可签名的包源
+- [x] 规则包索引与分发：指纹 + 签名 + 本地信任锚 + 只能收紧不放松
+- [x] `vigil init` 一键接入 + `vigil doctor` 体检（对标 ECC 的 doctor/repair）
 
 ## License
 

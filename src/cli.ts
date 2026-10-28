@@ -24,6 +24,23 @@ import { arbitrate } from './pipeline/arbiter.ts';
 import type { Position } from './pipeline/arbiter.ts';
 import { BUILTIN_PACKS, findBuiltinPack } from './policy/builtin-packs.ts';
 import { KILL_FILE, engageKill, readKillState, releaseKill } from './policy/killswitch.ts';
+import { doctor, init } from './policy/doctor.ts';
+import {
+  TRUST_FILE,
+  addTrustedKey,
+  isTrusted,
+  readTrustStore,
+  writeTrustStore,
+  INDEX_FILENAME,
+  buildIndexEntry,
+  installFromIndex,
+  packDigest,
+  publishToIndex,
+  readIndex,
+  searchIndex,
+  verifyPack,
+  writeIndex,
+} from './policy/registry.ts';
 import {
   PACKS_DIR,
   installPack,
@@ -52,6 +69,7 @@ const KEY_PATH = process.env.VIGIL_SIGNING_KEY ?? '.vigil/signing-key.json';
 const THRESHOLDS_PATH = process.env.VIGIL_THRESHOLDS ?? '.vigil/thresholds.json';
 const CONFIG_PATH = process.env.VIGIL_CONFIG ?? CONFIG_BASENAME;
 const KILL_PATH = process.env.VIGIL_KILL_SWITCH ?? KILL_FILE;
+const TRUST_PATH = process.env.VIGIL_TRUST ?? TRUST_FILE;
 
 /** 有密钥文件就签名，没有就明链。密钥的出现永远是显式动作（vigil keygen）。 */
 function buildSigner(): LedgerSigner | null {
@@ -211,10 +229,13 @@ function usage(): void {
   process.stdout.write(`vigil — AI 决策账本与熔断内核
 
 用法：
-  vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转人工
+  vigil init                        一键接入：生成密钥、规则包目录、钩子配置
+vigil trust list|add|remove       信任的签名公钥（规则包验签用）
+vigil doctor                      体检：账本、密钥、规则包、钩子是否都接上了
+vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转人工
   vigil unkill                       解除紧急制动
   vigil status                       当前账本与制动状态一览
-  vigil rules list|show|check|install   规则包：查看、校验、安装
+  vigil rules list|show|check|install|search|publish|verify   规则包：查看、校验、安装、检索、登记
   vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
   vigil arbitrate <文件.json|->    多 agent 结论冲突时定夺
@@ -532,6 +553,79 @@ async function main(): Promise<void> {
       return;
     }
 
+    case 'init': {
+      const result = init({
+        cwd: process.cwd(),
+        keyPath: KEY_PATH,
+        packsDir: process.env.VIGIL_PACKS ?? PACKS_DIR,
+        writeClaudeSettings: rest.includes('--write-claude-settings'),
+      });
+      for (const note of result.notes) process.stdout.write(`· ${note}\n`);
+      process.stdout.write('\n下一步：\n');
+      process.stdout.write('  1. 把钩子配置合并进 .claude/settings.json（命令路径改成你的绝对路径）\n');
+      process.stdout.write('  2. 先用影子模式跑一天：VIGIL_SHADOW=1，不拦只看\n');
+      process.stdout.write('  3. 跑 vigil doctor 确认都接上了\n');
+      return;
+    }
+
+    case 'doctor': {
+      const results = doctor({
+        ledgerPath: LEDGER_PATH,
+        packsDir: process.env.VIGIL_PACKS ?? PACKS_DIR,
+        keyPath: KEY_PATH,
+        indexPath: process.env.VIGIL_RULES_INDEX ?? INDEX_FILENAME,
+        trustPath: TRUST_PATH,
+        killSwitchPath: KILL_PATH,
+      });
+      let broken = 0;
+      for (const item of results) {
+        if (!item.ok) broken += 1;
+        process.stdout.write(`${item.ok ? '✓' : '✗'} ${item.name.padEnd(16)}${item.detail}\n`);
+      }
+      process.stdout.write(
+        `\n${results.length - broken}/${results.length} 项正常${broken > 0 ? `，${broken} 项要处理` : ''}\n`,
+      );
+      if (broken > 0) process.exitCode = 2;
+      return;
+    }
+
+    case 'trust': {
+      const sub = rest[0] ?? 'list';
+      const store = readTrustStore(TRUST_PATH);
+      if (sub === 'list') {
+        if (store.keys.length === 0) {
+          process.stdout.write(`信任列表是空的（${TRUST_PATH}）。\n`);
+          process.stdout.write('没有信任的公钥时，带签名的规则包一律装不了 —— 这是故意的。\n');
+        } else {
+          process.stdout.write(`信任列表（${TRUST_PATH}）：\n`);
+          for (const key of store.keys) {
+            process.stdout.write(`  ${key.name.padEnd(24)}${key.addedAt ?? ''}\n`);
+          }
+        }
+        return;
+      }
+      if (sub === 'add') {
+        const file = rest[1];
+        if (!file) throw new Error('用法：vigil trust add <公钥.pem> [名字]');
+        const pem = readFileSync(file, 'utf8');
+        const name = rest[2] ?? file.split('/').pop() ?? '未命名';
+        const result = addTrustedKey(store, name, pem);
+        writeTrustStore(result.store, TRUST_PATH);
+        process.stdout.write(result.added ? `已信任 ${name}\n` : `${name} 已经在信任列表里了\n`);
+        return;
+      }
+      if (sub === 'remove') {
+        const name = rest[1];
+        if (!name) throw new Error('用法：vigil trust remove <名字>');
+        const keys = store.keys.filter((key) => key.name !== name);
+        if (keys.length === store.keys.length) throw new Error(`信任列表里没有 ${name}`);
+        writeTrustStore({ keys }, TRUST_PATH);
+        process.stdout.write(`已移除 ${name}\n`);
+        return;
+      }
+      throw new Error(`未知的子命令：${sub}。可用：list / add / remove`);
+    }
+
     case 'kill': {
       const reasonArg = rest.indexOf('--reason');
       const reason = reasonArg >= 0 ? (rest[reasonArg + 1] ?? '') : '';
@@ -632,7 +726,33 @@ async function main(): Promise<void> {
 
       if (sub === 'install') {
         const target = rest[1];
-        if (!target) throw new Error('用法：vigil rules install <内置包 id | 文件.json>');
+        if (!target) throw new Error('用法：vigil rules install <内置包 id | 文件.json | 索引中的包 id>');
+        const indexPath = process.env.VIGIL_RULES_INDEX ?? INDEX_FILENAME;
+
+        // 索引里的 id 优先按"从索引安装"处理：要先过指纹和签名
+        const index = readIndex(indexPath);
+        const entry = index.packs.find((item) => item.id === target);
+
+        if (entry) {
+          const identity = loadSigningIdentity(KEY_PATH);
+          const trust = readTrustStore(TRUST_PATH);
+          const result = await installFromIndex(entry, dir, {
+            trustedKeyPem: identity?.publicKeyPem,
+            trust,
+            force: rest.includes('--force'),
+          });
+          process.stdout.write(
+            `已安装规则包 ${entry.id} v${entry.version}（${entry.rules} 条规则）→ ${result.path}\n`,
+          );
+          process.stdout.write(
+            result.verify.signed
+              ? '签名验证通过。\n'
+              : '⚠ 这个包没有签名：内容指纹对得上，但没人为它背书。装之前请自己读一遍规则内容。\n',
+          );
+          process.stdout.write('下次启动内核时生效。\n');
+          return;
+        }
+
         const pack = findBuiltinPack(target) ?? loadPackFile(target);
         const result = installPack(pack, dir, rest.includes('--force'));
         process.stdout.write(
@@ -642,7 +762,76 @@ async function main(): Promise<void> {
         return;
       }
 
-      throw new Error(`未知的子命令：${sub}。可用：list / show / check / install`);
+      if (sub === 'search') {
+        const keyword = rest.slice(1).filter((item) => !item.startsWith('--')).join(' ');
+        const indexPath = process.env.VIGIL_RULES_INDEX ?? INDEX_FILENAME;
+        const index = readIndex(indexPath);
+        const hits = searchIndex(index, keyword);
+        if (hits.length === 0) {
+          process.stdout.write(`索引 ${indexPath} 里没有匹配「${keyword}」的包（共 ${index.packs.length} 个包）。\n`);
+          return;
+        }
+        process.stdout.write(`索引 ${indexPath}，匹配 ${hits.length} 个：\n`);
+        for (const item of hits) {
+          const mark = item.signature ? '✓已签名' : '  未签名';
+          process.stdout.write(
+            `  ${pad(item.id, 32)}${pad(item.version, 10)}${pad(mark, 10)}${item.rules} 条  ${item.name}\n`,
+          );
+          if (item.description) process.stdout.write(`  ${' '.repeat(32)}${item.description}\n`);
+        }
+        return;
+      }
+
+      if (sub === 'publish') {
+        const file = rest[1];
+        if (!file) throw new Error('用法：vigil rules publish <文件.json> [--index 索引路径] [--sign]');
+        const indexPath = process.env.VIGIL_RULES_INDEX ?? INDEX_FILENAME;
+        const pack = loadPackFile(file);
+        const identity = loadSigningIdentity(KEY_PATH);
+        const sign = rest.includes('--sign');
+        if (sign && !identity) {
+          throw new Error('要签名就得有签名密钥。先跑 vigil init 生成一个。');
+        }
+        const entry = buildIndexEntry(pack, file, {
+          author: identity ? '本机' : undefined,
+          signer: sign && identity ? { privateKeyPem: identity.privateKeyPem, publicKeyPem: identity.publicKeyPem } : undefined,
+        });
+        const index = readIndex(indexPath);
+        const result = publishToIndex(index, entry);
+        writeIndex(indexPath, result.index);
+        process.stdout.write(
+          `已${result.replaced ? '更新' : '登记'} ${entry.id} v${entry.version} → ${indexPath}\n`,
+        );
+        process.stdout.write(`指纹 sha256:${entry.sha256.slice(0, 16)}…\n`);
+        if (!entry.signature) process.stdout.write('未签名。要签名加 --sign。\n');
+        return;
+      }
+
+      if (sub === 'verify') {
+        const file = rest[1];
+        if (!file) throw new Error('用法：vigil rules verify <文件.json> [--index 索引路径]');
+        const indexPath = process.env.VIGIL_RULES_INDEX ?? INDEX_FILENAME;
+        const index = readIndex(indexPath);
+        const pack = loadPackFile(file);
+        const entry = index.packs.find((item) => item.id === pack.id);
+        if (!entry) {
+          process.stdout.write(`索引 ${indexPath} 里没有 ${pack.id} 的条目，无法核对指纹。\n`);
+          process.stdout.write(`本地指纹 sha256:${packDigest(pack).slice(0, 16)}…\n`);
+          return;
+        }
+        const identity = loadSigningIdentity(KEY_PATH);
+        const trust = readTrustStore(TRUST_PATH);
+        const result = verifyPack(entry, pack, { trustedKeyPem: identity?.publicKeyPem, trust });
+        if (result.ok) {
+          process.stdout.write(`✓ ${pack.id} 校验通过${result.signed ? '，签名有效' : '（未签名）'}\n`);
+        } else {
+          process.stdout.write(`✗ ${pack.id} 校验不通过：${result.reason}\n`);
+          process.exitCode = 2;
+        }
+        return;
+      }
+
+      throw new Error(`未知的子命令：${sub}。可用：list / show / check / install / search / publish / verify`);
     }
 
     case 'ledger-migrate': {

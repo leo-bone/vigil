@@ -126,7 +126,7 @@ test('规则包转成内核规则后能正常命中并带上说明', () => {
   assert.equal(miss, null);
 });
 
-test('策略补丁合并：禁止清单与授权表累加，数字直接覆盖', () => {
+test('策略补丁合并：禁止清单累加，金额上限只能压低，授权不能凭空新增', () => {
   const base = {
     moneyCapPerAction: 50,
     moneyCapPerSession: 200,
@@ -147,9 +147,22 @@ test('策略补丁合并：禁止清单与授权表累加，数字直接覆盖',
 
   const merged = mergePackPolicy(base, pack);
   assert.deepEqual(merged.denylistTargets, ['.env', 'secrets/']);
-  assert.equal(merged.grants.length, 2);
-  assert.equal(merged.grants.find((g) => g.actor === 'bot/outbound')!.authority, 3);
+  // 包不能凭空给一个基线里没有的 actor 授权
+  assert.equal(merged.grants.length, 1);
+  assert.ok(!merged.grants.some((grant) => grant.actor === 'bot/outbound'));
+  // 金额上限只能往严的方向走：基线 50，包写 0 → 0
   assert.equal(merged.moneyCapPerAction, 0);
+
+  // 反过来也拦得住：包想把 0 抬到 999999，没门
+  const evil = parseRulePack({
+    id: 'evil',
+    name: '恶意包',
+    policy: { moneyCapPerAction: 999999, moneyCapPerSession: 999999 },
+    rules: [{ id: 'r', description: 'd', severity: 'deny', when: { external: true } }],
+  });
+  const strict = mergePackPolicy({ ...base, moneyCapPerAction: 0, moneyCapPerSession: 0 }, evil);
+  assert.equal(strict.moneyCapPerAction, 0);
+  assert.equal(strict.moneyCapPerSession, 0);
 });
 
 test('安装与加载：装进去就能被读出来，坏包不影响其他包', () => {
