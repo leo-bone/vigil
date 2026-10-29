@@ -23,6 +23,8 @@ export interface EvidenceQuery {
   domain: string;
   /** 决策问题文本 */
   question: string;
+  /** 多方案决策时，指定归属于哪个方案（如「B2B批发-东南亚」）；后端据此返回方案专属证据 */
+  option?: string;
 }
 
 /** 某个源能服务的 (领域, 维度, 通道) 能力描述 */
@@ -405,7 +407,11 @@ export class HttpSearchSource implements EvidenceSource {
       const res = await fetch(this.url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...this.headers },
-        body: JSON.stringify({ query: `[${q.dimension}] ${q.question}`, dimension: q.dimension }),
+        body: JSON.stringify({
+          query: `[${q.dimension}] ${q.question}`,
+          dimension: q.dimension,
+          option: q.option ?? null,
+        }),
         signal: ctrl.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -418,8 +424,9 @@ export class HttpSearchSource implements EvidenceSource {
     return {
       dimension: q.dimension,
       channel: `http-search-${q.dimension}`,
-      source: `${this.url} (dim=${q.dimension}, fetched=${fetchedAt})`,
+      source: `${this.url} (dim=${q.dimension}${q.option ? `,opt=${q.option}` : ''}, fetched=${fetchedAt})`,
       verified: true,
+      option: q.option,
       note: text,
       capturedAt: fetchedAt,
     };
@@ -497,51 +504,65 @@ export async function gatherEvidence(
   ];
 
   const evidence: ChannelEvidence[] = [];
+  const dimOf = (e: ChannelEvidence) => e.dimension ?? e.channel;
+  // 多方案 goal：existing 已按 option 分组（≥2 个方案）时，补抓也按 (维度, 方案) 分别向后端取，
+  // 让自动补回的每条证据都归属到具体方案，多方案决策矩阵才能精确评分（而非退化为通用维度）。
+  const optionSet = Array.from(new Set(existing.map((e) => e.option).filter((o): o is string => !!o)));
+  const multiOption = optionSet.length >= 2;
 
   for (const dim of spec.required) {
     // 先沿用已核验的既有证据（整维度）：手填/搜索已核验的，不重复抓取，避免把真实证据丢掉
-    const priorVerified = existing.filter((e) => (e.dimension ?? e.channel) === dim && e.verified);
+    const priorVerified = existing.filter((e) => dimOf(e) === dim && e.verified);
     if (priorVerified.length > 0) {
       for (const p of priorVerified) evidence.push(p);
       continue;
     }
 
-    const sourcesForDim = activeSources.filter((s) =>
-      s instanceof SearchSource ? s.canServe({ dimension: dim, domain, question }) : matches(s, { dimension: dim, domain, question }),
-    );
+    // 单方案 / 无方案：整维度补抓一次；多方案：按每个方案分别补抓，证据归属方案
+    const tasks: Array<{ option?: string }> = multiOption ? optionSet.map((o) => ({ option: o })) : [{}];
 
-    if (sourcesForDim.length === 0) {
-      evidence.push({
-        dimension: dim,
-        channel: dim,
-        source: '(none)',
-        verified: false,
-        note: '无可用实时源，需人工 / 搜索补充',
-      });
-      continue;
-    }
-
-    // 同一维度的多路源并发探测（任一成功即覆盖该维度），既提速又避免单源超时级联拖垮整轮采集
-    const settled = await Promise.allSettled(
-      sourcesForDim.map((src) => src.fetch({ dimension: dim, domain, question })),
-    );
-    settled.forEach((res, i) => {
-      const src = sourcesForDim[i];
-      const cap = src.serves.find((c) => (c.domain === undefined || c.domain === domain) && c.dimension === dim);
-      const channel = cap?.channel ?? src.id;
-      if (res.status === 'fulfilled') {
-        evidence.push(res.value);
-      } else {
-        const msg = res.reason instanceof Error ? res.reason.message : String(res.reason);
-        evidence.push({
-          dimension: dim,
-          channel,
-          source: src.id,
-          verified: false,
-          note: `采集失败：${msg}`,
-        });
+    for (const task of tasks) {
+      const q: EvidenceQuery = { dimension: dim, domain, question, option: task.option };
+      const sourcesForDim = activeSources.filter((s) =>
+        s instanceof SearchSource ? s.canServe(q) : matches(s, q),
+      );
+      if (sourcesForDim.length === 0) {
+        // 仅当整维度补抓（无方案）时才记未核验占位；分方案补抓缺源则跳过该方案该维度
+        if (!task.option) {
+          evidence.push({
+            dimension: dim,
+            channel: dim,
+            source: '(none)',
+            verified: false,
+            note: '无可用实时源，需人工 / 搜索补充',
+          });
+        }
+        continue;
       }
-    });
+
+      // 同一 (维度,方案) 的多路源并发探测（任一成功即覆盖），避免单源超时级联
+      const settled = await Promise.allSettled(sourcesForDim.map((src) => src.fetch(q)));
+      settled.forEach((res, i) => {
+        const src = sourcesForDim[i];
+        const cap = src.serves.find((c) => (c.domain === undefined || c.domain === domain) && c.dimension === dim);
+        const channel = cap?.channel ?? src.id;
+        if (res.status === 'fulfilled') {
+          const ev = res.value;
+          if (task.option && !ev.option) ev.option = task.option; // 明确归属方案，矩阵才能精确评分
+          evidence.push(ev);
+        } else {
+          const msg = res.reason instanceof Error ? res.reason.message : String(res.reason);
+          evidence.push({
+            dimension: dim,
+            channel,
+            source: src.id,
+            verified: false,
+            option: task.option,
+            note: `采集失败：${msg}`,
+          });
+        }
+      });
+    }
   }
 
   // 以"维度是否至少有 1 条 verified"汇总，与完整性闸门口径一致

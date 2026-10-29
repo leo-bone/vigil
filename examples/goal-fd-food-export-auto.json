@@ -1,0 +1,43 @@
+{
+  "sessionId": "sess_fd_food_export_auto_2026-10-29",
+  "question": "启动冻干食品（FD）跨境出口业务，选哪条路径：B2B 大宗批发（东南亚） 还是 跨境电商零售（欧美）？",
+  "domain": "work",
+  "evidenceSpec": "work",
+  "action": {
+    "kind": "decide",
+    "actor": "user",
+    "type": "generic_decision",
+    "target": "冻干食品跨境出口业务路径选择：B2B批发(东南亚) vs 跨境电商零售(欧美)",
+    "reversible": true,
+    "external": false,
+    "rationale": "为冻干食品跨境业务选择最优起步路径（政策/专家/风险等维度交由搜索后端自动补抓）"
+  },
+  "positions": [
+    {
+      "actor": "vigil",
+      "authority": 1,
+      "conclusion": "allow",
+      "reason": "系统依据已核验证据生成决策矩阵（见 reasoning 阶段），交由确认闸门/裁决定夺"
+    }
+  ],
+  "evidence": [
+    {
+      "dimension": "financial",
+      "channel": "cost-sea",
+      "source": "长沙本地冻干代工报价 + 东南亚物流核算（估）",
+      "verified": true,
+      "option": "B2B批发-东南亚",
+      "note": "启动资金约 20-40 万（首单备货+海运+样品）；毛利率约 25-35%；回款周期 30-60 天；轻资产可先从转口/代工贴牌起步",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "financial",
+      "channel": "cost-euus",
+      "source": "亚马逊 FBA + 海外仓 + 合规核算（估）",
+      "verified": true,
+      "option": "跨境电商零售-欧美",
+      "note": "启动资金约 50-100 万（备货+海外仓+FBA+广告+合规）；毛利率高（40-55%）但流量与退货成本高、现金占用大；回款 14-45 天",
+      "capturedAt": "2026-10-29"
+    }
+  ]
+}

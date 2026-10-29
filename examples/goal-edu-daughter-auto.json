@@ -1,0 +1,43 @@
+{
+  "sessionId": "sess_edu_auto_2026-10-29",
+  "question": "女儿就读湖南商务职业技术学院（数智营销专业，大专），本科升学走哪条路：专升本 还是 竞赛免试升本科？",
+  "domain": "education",
+  "evidenceSpec": "education",
+  "action": {
+    "kind": "decide",
+    "actor": "user",
+    "type": "generic_decision",
+    "target": "本科升学路径选择：专升本 vs 竞赛免试升本科",
+    "reversible": true,
+    "external": false,
+    "rationale": "为女儿选择最优本科升学路径（政策/专家/风险等维度交由搜索后端自动补抓）"
+  },
+  "positions": [
+    {
+      "actor": "vigil",
+      "authority": 1,
+      "conclusion": "allow",
+      "reason": "系统依据已核验证据生成决策矩阵（见 reasoning 阶段），交由确认闸门/裁决定夺"
+    }
+  ],
+  "evidence": [
+    {
+      "dimension": "financial",
+      "channel": "cost",
+      "source": "两年本科学费+备考成本估算（湖南公办本科约 4000-8000 元/年）",
+      "verified": true,
+      "option": "专升本",
+      "note": "统招专升本：备考资料+培训约 3000-8000 元，本科学费约 0.8-1.6 万/两年",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "financial",
+      "channel": "cost",
+      "source": "竞赛备赛成本估算",
+      "verified": true,
+      "option": "竞赛免试升本科",
+      "note": "竞赛路线：报名/差旅/集训约 5000-1.5 万，但不确定性高，可能两手空空",
+      "capturedAt": "2026-10-29"
+    }
+  ]
+}

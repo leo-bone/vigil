@@ -6,6 +6,7 @@ import {
   SearchSource,
   NO_SEARCH,
   type EvidenceSource,
+  type EvidenceQuery,
 } from '../src/loop/evidenceProvider.ts';
 import type { ChannelEvidence, EvidenceSpec } from '../src/loop/evidence.ts';
 
@@ -114,4 +115,50 @@ test('FrankfurterFxSource 解析真实响应（mock fetch，离线确定性）',
   } finally {
     globalThis.fetch = saved;
   }
+});
+
+test('多方案 goal：搜索后端按 (维度,方案) 分别补抓，证据归属到各方案', async () => {
+  // 模拟 HttpSearchSource 行为：把查询里的 option 透传到返回证据的 option 上，实现方案归属
+  class OptionAwareSource implements EvidenceSource {
+    id = 'opt-aware';
+    serves = [
+      { dimension: 'authoritative' as const },
+      { dimension: 'expert' as const },
+      { dimension: 'risk' as const },
+      { dimension: 'regulatory' as const },
+      { dimension: 'alternative' as const },
+    ];
+    async fetch(q: EvidenceQuery) {
+      return {
+        dimension: q.dimension,
+        channel: `opt-${q.dimension}`,
+        source: 'mock',
+        verified: true,
+        option: q.option,
+        note: `ev for ${q.dimension}/${q.option ?? '-'}`,
+      } satisfies ChannelEvidence;
+    }
+  }
+  const spec: EvidenceSpec = {
+    required: ['authoritative', 'expert', 'financial', 'risk', 'regulatory', 'alternative'],
+  };
+  const existing: ChannelEvidence[] = [
+    { dimension: 'financial', channel: 'cost-a', source: 'x', verified: true, option: '方案A', note: 'cost a' },
+    { dimension: 'financial', channel: 'cost-b', source: 'x', verified: true, option: '方案B', note: 'cost b' },
+  ];
+  const res = await gatherEvidence(spec, 'q', 'work', [new OptionAwareSource()], { existing });
+  // financial 沿用手填(2 条) + 其余 5 维度 × 2 方案(10 条) = 12 条，都带 option 归属
+  const optEv = res.evidence.filter((e) => e.option);
+  assert.equal(optEv.length, 12);
+  const a = res.evidence.filter((e) => e.option === '方案A');
+  const b = res.evidence.filter((e) => e.option === '方案B');
+  assert.equal(a.length, 6); // 1 手填 financial + 5 自动补抓非金融
+  assert.equal(b.length, 6);
+  assert.ok(
+    ['authoritative', 'expert', 'risk', 'regulatory', 'alternative'].every((d) =>
+      a.some((e) => e.dimension === d && e.verified),
+    ),
+  );
+  // financial 未被重复补抓
+  assert.equal(res.evidence.filter((e) => e.dimension === 'financial').length, 2);
 });
