@@ -4,11 +4,13 @@ import type { ActionSpec } from '../types.ts';
 import type { Kernel } from '../kernel.ts';
 import { arbitrate, type Position } from '../pipeline/arbiter.ts';
 import { LoopEventBus, type LoopEvent } from './events.ts';
-import { checkCompleteness, type ChannelEvidence, type EvidenceSpec } from './evidence.ts';
+import { checkCompleteness, resolveDomainSpec, type ChannelEvidence, type EvidenceSpec } from './evidence.ts';
 import type { Notifier } from './notifier.ts';
 import type { ActionExecutor } from './executor.ts';
 import { DryRunExecutor } from './executor.ts';
 import { buildBrief, type DecisionBrief } from './reasoning.ts';
+import type { EvidenceSource } from './evidenceProvider.ts';
+import { gatherEvidence } from './evidenceProvider.ts';
 
 /**
  * 决策循环状态机。
@@ -71,6 +73,10 @@ export class DecisionLoop {
   #decisionDetail: string | undefined;
   #brief: DecisionBrief | undefined;
   #executor: ActionExecutor;
+  #sources: EvidenceSource[];
+  #extended: boolean;
+  /** monitor 上一周期的结论，用于检测"决策依据变化"并主动推送 */
+  #lastMonitorRecommendation: string | undefined;
 
   constructor(
     kernel: Kernel,
@@ -79,6 +85,8 @@ export class DecisionLoop {
     loopId?: string,
     notifier?: Notifier,
     executor?: ActionExecutor,
+    sources: EvidenceSource[] = [],
+    extended = false,
   ) {
     this.#kernel = kernel;
     this.#goal = goal;
@@ -89,6 +97,8 @@ export class DecisionLoop {
       notifier,
     });
     this.#executor = executor ?? new DryRunExecutor();
+    this.#sources = sources;
+    this.#extended = extended;
     this.#statePath = join(vigilDir, `loop-${this.loopId}.json`);
     // 若以已有 loopId 构造（--resume 路径），恢复先前状态，使 resume 能正确判门
     if (loopId) {
@@ -278,6 +288,56 @@ export class DecisionLoop {
     }
     await this.#execute();
     return this.#buildState();
+  }
+
+  /**
+   * 监控周期（pull→push 闭环的核心）：重新采集实时证据 → 重建决策简报 → 推送周期快照；
+   * 若"决策依据/结论"相较上一周期发生变化，发出 alert 事件，主动推送提醒。
+   *
+   * 与 run() 的区别：monitor 只"看"不"动"——不重跑仲裁、不触发执行闸门，
+   * 因此可安全地周期性运行而不产生任何真实动作；真正的执行仍由人确认。
+   *
+   * 返回本周期的 DecisionBrief（便于调用方做二次处理 / 测试断言）。
+   */
+  async monitorCycle(): Promise<DecisionBrief | null> {
+    const domain = this.#goal.domain ?? 'custom';
+    // 统一把 evidenceSpec 解析成对象（CLI 已解析；直接喂 example 文件时可能是字符串 key）
+    const rawSpec = this.#goal.evidenceSpec;
+    const spec: EvidenceSpec =
+      typeof rawSpec === 'string' ? resolveDomainSpec(rawSpec) : rawSpec ?? { required: [] };
+    const requiredDims = spec.required;
+
+    // 有实时源才重新采集；否则仅基于既有证据重建简报（同样能检测手填证据变化）
+    if (this.#sources.length > 0) {
+      const g = await gatherEvidence(spec, this.#goal.question, domain, this.#sources, {
+        existing: this.#goal.evidence,
+        extended: this.#extended,
+      });
+      this.#goal.evidence = g.evidence;
+    }
+
+    const brief = buildBrief(domain, this.#goal.question, this.#goal.evidence, requiredDims);
+    this.#brief = brief;
+
+    this.#bus.emit(
+      'monitor',
+      'info',
+      `周期快照｜${brief.signalSummary} ｜ 结论：${brief.recommendation}`,
+    );
+
+    if (this.#lastMonitorRecommendation !== undefined && this.#lastMonitorRecommendation !== brief.recommendation) {
+      this.#bus.emit(
+        'monitor',
+        'alert',
+        `⚠ 决策依据变化：上一周期「${this.#lastMonitorRecommendation}」→ 本周期「${brief.recommendation}」`,
+      );
+    }
+    for (const cav of brief.caveats) {
+      this.#bus.emit('monitor', 'info', `⚠ 提示：${cav}`);
+    }
+
+    this.#lastMonitorRecommendation = brief.recommendation;
+    return brief;
   }
 
   async #execute(): Promise<void> {

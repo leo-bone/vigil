@@ -269,13 +269,13 @@ vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转�
   vigil ledger-migrate <源> <目标.db>   把 NDJSON 账本迁到 SQLite（并发用）
   vigil scan [目录] [--write] [--json]  扫描 agent 能力并生成治理配置（--write 立即生效）
   vigil arbitrate <文件.json|->    多 agent 结论冲突时定夺
-  vigil loop <goal.json> [--auto-confirm] [--gather] [--extended]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行（--gather 实时补抓证据，--extended 含加密/股指源）
+  vigil loop <goal.json> [--auto-confirm] [--gather] [--extended] [--repeat <分钟>]   决策循环：实时事件+证据完整性闸门+确认闸门+闭环执行（--gather 实时补抓证据，--extended 含加密/股指源，--repeat 进入监控模式把实时知道从拉变推）
   vigil loop --resume <id> [--confirm]      从挂起恢复（确认后闭环执行，确认后才真实触发执行适配器）
   vigil loop --watch <id>          实时回看某循环的事件流
   vigil evidence fetch <领域> "<问题>" [--extended]      实时采集该领域必备维度证据（附 source URL + 抓取时间戳；--extended 含加密/股指源）
   vigil domains                  列出所有支持的决策领域（衣食住行/工作/购物/旅行/融资/医疗/教育…）
   vigil decide <文件.json|->     请求裁决，结果写入账本
-  vigil ask "<自然语言目标>" [--domain <领域>] [--gather] [--extended]   用一句话发起决策：自动识别领域→实时采集→证据驱动裁决→确认闸门→闭环（配置 VIGIL_SEARCH_URL 后政策/专家/风险等维度自动补抓）
+  vigil ask "<自然语言目标>" [--domain <领域>] [--gather] [--extended] [--repeat <分钟>]   用一句话发起决策：自动识别领域→实时采集→证据驱动裁决→确认闸门→闭环（--repeat 进入监控模式主动推送变化；配置 VIGIL_SEARCH_URL 后政策/专家/风险等维度自动补抓）
   vigil run -- <命令>            包住一条 shell 命令，先裁决再执行
   vigil hook claude [--shadow]  作为 Claude Code 的 PreToolUse 钩子运行
   vigil ledger [--json]          列出全部决策
@@ -318,6 +318,33 @@ vigil kill [--reason "原因"]      紧急制动：此后所有动作一律转�
   VIGIL_EXTENDED_SOURCES=1  默认纳入加密/股指等扩展实时源（CLI 也可用 --extended）
   VIGIL_AV_KEY        AlphaVantage key（国债源，不填用 demo）
 `);
+}
+
+/**
+ * 监控模式（pull→push 闭环）：以指定间隔周期性重新采集实时证据、重建决策简报，
+ * 并通过已配置的推送通道主动通知——把"实时知道"从人去 `vigil loop --watch` 拉，
+ * 变成系统变了就推给你。monitor 只"看"不"动"，不会自动执行任何动作。
+ */
+async function startMonitor(loop: DecisionLoop, repeatMinutes: number): Promise<void> {
+  process.stdout.write(
+    `\n🔁 进入监控模式：每 ${repeatMinutes} 分钟重新采集实时证据并推送变化（Ctrl-C 退出）\n`,
+  );
+  // 立即跑一周期作为基线（同时建立"上一周期结论"用于变化检测）
+  await loop.monitorCycle();
+  const timer = setInterval(async () => {
+    try {
+      await loop.monitorCycle();
+    } catch (err) {
+      process.stderr.write(`[vigil] 监控周期失败：${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  }, repeatMinutes * 60_000);
+  const stop = (): void => {
+    clearInterval(timer);
+    process.stdout.write('\n监控已停止。\n');
+    process.exit(0);
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
 }
 
 async function main(): Promise<void> {
@@ -996,6 +1023,8 @@ async function main(): Promise<void> {
       const executor = buildExecutor();
 
       const extendedFlag = rest.includes('--extended') || !!process.env.VIGIL_EXTENDED_SOURCES;
+      const repeatIdx = rest.indexOf('--repeat');
+      const repeatMinutes = repeatIdx >= 0 ? Number(rest[repeatIdx + 1]) || 0 : 0;
       const searchUrl = process.env.VIGIL_SEARCH_URL;
       const sources = buildSources({ extended: extendedFlag, searchUrl });
       const autoConfirm = rest.includes('--auto-confirm');
@@ -1047,13 +1076,16 @@ async function main(): Promise<void> {
         const icon = event.level === 'alert' ? '🔔' : event.level === 'gate' ? '⏸' : '·';
         process.stdout.write(`[${t}] ${icon} ${event.message}\n`);
       };
-      const loop = new DecisionLoop(kernel, goal, vigilDir, undefined, notifier, executor);
+      const loop = new DecisionLoop(kernel, goal, vigilDir, undefined, notifier, executor, sources, extendedFlag);
       loop.on(sink);
       const final = await loop.run();
       process.stdout.write(`\n循环 ID：${loop.loopId}\n`);
       process.stdout.write(`循环状态：${final.status}\n`);
       if (final.status === 'awaiting_confirmation') {
         process.stdout.write(`⏸ 已挂起等待你确认。恢复：vigil loop --resume ${loop.loopId} --confirm\n`);
+      }
+      if (repeatMinutes > 0) {
+        await startMonitor(loop, repeatMinutes);
       }
       return;
     }
@@ -1081,6 +1113,8 @@ async function main(): Promise<void> {
       const autoConfirm = rest.includes('--auto-confirm');
       const gatherFlag = rest.includes('--gather');
       const extendedFlag = rest.includes('--extended') || !!process.env.VIGIL_EXTENDED_SOURCES;
+      const repeatIdx = rest.indexOf('--repeat');
+      const repeatMinutes = repeatIdx >= 0 ? Number(rest[repeatIdx + 1]) || 0 : 0;
       const searchUrl = process.env.VIGIL_SEARCH_URL;
       const sources = buildSources({ extended: extendedFlag, searchUrl });
       const vigilDir = process.env.VIGIL_DIR ?? '.vigil';
@@ -1173,13 +1207,16 @@ async function main(): Promise<void> {
         );
       }
 
-      const loop = new DecisionLoop(kernel, goal, vigilDir, undefined, notifier, executor);
+      const loop = new DecisionLoop(kernel, goal, vigilDir, undefined, notifier, executor, sources, extendedFlag);
       loop.on(sink);
       const final = await loop.run();
       process.stdout.write(`\n循环 ID：${loop.loopId}\n`);
       process.stdout.write(`循环状态：${final.status}\n`);
       if (final.status === 'awaiting_confirmation') {
         process.stdout.write(`⏸ 已挂起等待你确认。恢复：vigil loop --resume ${loop.loopId} --confirm\n`);
+      }
+      if (repeatMinutes > 0) {
+        await startMonitor(loop, repeatMinutes);
       }
       return;
     }

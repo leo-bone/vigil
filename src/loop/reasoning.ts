@@ -107,10 +107,11 @@ export function buildBrief(
 }
 
 /** 从注册表解析必备维度；未知领域回退到证据里出现过的维度，避免崩溃 */
-function safeRequired(domain: string, evidence: ChannelEvidence[]): EvidenceDimension[] {
+function safeRequired(domain: string, evidence: ChannelEvidence[] = []): EvidenceDimension[] {
   try {
     return resolveDomainSpec(domain).required;
   } catch {
+    if (evidence.length === 0) return [];
     return Array.from(new Set(evidence.map((e) => e.dimension ?? e.channel))) as EvidenceDimension[];
   }
 }
@@ -181,8 +182,17 @@ function buildMatrixBrief(
   options: string[],
 ): DecisionBrief {
   const dimOf = (e: ChannelEvidence) => e.dimension ?? e.channel;
-  // 风险红牌关键词：只有风险维度证据明确指向负面结果时才算红牌，避免"已评估风险=有风险"的误判
-  const RED_FLAG = /风险|红牌|危险|失败|坑|拒|不予|不能|不可|极高|极低|缺失|未核验|爆雷|诈骗|副作用|违规|不确定|收紧|低概率|落空/;
+  // 风险红牌关键词（不含中性词"风险"——risk 维度本身就在谈风险，提"风险"不构成红牌；
+  // 只认严重的阻断性信号：红牌/危险/失败/爆雷/诈骗/违规/极高极低/拒/不予…）
+  const RED_FLAG = /红牌|危险|失败|坑|拒|不予|不能|不可|极高|极低|缺失|未核验|爆雷|诈骗|副作用|违规|不确定|收紧|低概率|落空|退运|封号|冻结|断裂/;
+  // 否定语境：关键词前出现 无/没/非/不/未/暂/几乎/无硬性/无明确 等，说明"没有该风险"，不算红牌
+  const NEGATION = /(无|没|非|不|未|暂|几乎|不含|无硬性|无明确|无显著|没有|不存在)/;
+  const isRedFlag = (note: string): boolean => {
+    const m = RED_FLAG.exec(note);
+    if (!m || m.index === undefined) return false;
+    const ctx = note.slice(Math.max(0, m.index - 6), m.index);
+    return !NEGATION.test(ctx);
+  };
   const scored: DecisionOptionScore[] = options.map((opt) => {
     const optEv = evidence.filter((e) => e.option === opt);
     const verifiedDims = requiredDims.filter((d) => optEv.some((e) => dimOf(e) === d && e.verified));
@@ -190,7 +200,7 @@ function buildMatrixBrief(
     const riskNotes = optEv
       .filter((e) => dimOf(e) === 'risk' && e.verified && e.note)
       .map((e) => e.note as string);
-    const riskFlags = riskNotes.filter((n) => RED_FLAG.test(n));
+    const riskFlags = riskNotes.filter((n) => isRedFlag(n));
     const coverage = requiredDims.length ? verifiedDims.length / requiredDims.length : 0;
     // 惩罚：明确风险红牌重罚(-0.4)；风险维度缺失(未评估)轻罚(-0.15)，因为"未知风险"也需谨慎
     const penalty = riskFlags.length > 0 ? 0.4 : missingDims.includes('risk') ? 0.15 : 0;

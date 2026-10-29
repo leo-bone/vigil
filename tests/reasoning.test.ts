@@ -217,3 +217,51 @@ test('SearchSource 无后端（NO_SEARCH）时 canServe=false，诚实不假核�
   const src = new SearchSource(NO_SEARCH);
   assert.equal(src.canServe({ dimension: 'regulatory', domain: 'education', question: 'x' }), false);
 });
+
+test('风险红牌：否定语境（"无硬性合规红牌"）不算红牌，仅真实红牌才罚分', () => {
+  // work 领域必备维度：authoritative / expert / financial / risk / alternative / regulatory
+  const mk = (
+    option: string,
+    dimension: 'authoritative' | 'expert' | 'financial' | 'risk' | 'alternative' | 'regulatory',
+    note: string,
+  ): ChannelEvidence => ({
+    dimension,
+    channel: `${dimension}-${option}`,
+    source: 'unit-test',
+    verified: true,
+    option,
+    note,
+  });
+  const evidence: ChannelEvidence[] = [
+    mk('B2B', 'authoritative', '东南亚需求稳定'),
+    mk('B2B', 'expert', '从业者反馈门槛低'),
+    mk('B2B', 'financial', '启动 20-40 万'),
+    mk('B2B', 'risk', '风险：账期长、低价内卷；但无硬性合规红牌，试错成本低'),
+    mk('B2B', 'alternative', '可转 ODM 代工兜底'),
+    mk('B2B', 'regulatory', '需出口备案'),
+    mk('EUUS', 'authoritative', '欧美客单价高'),
+    mk('EUUS', 'expert', '卖家反馈利润厚'),
+    mk('EUUS', 'financial', '启动 50-100 万'),
+    mk('EUUS', 'risk', '红牌：合规单证缺失即退运、平台封号，现金链断裂风险高'),
+    mk('EUUS', 'alternative', '可用 TikTok Shop 分流'),
+    mk('EUUS', 'regulatory', '需 FDA/EFSA 合规'),
+  ];
+  const brief = buildBrief('work', '冻干食品跨境走哪条路', evidence);
+  assert.equal(brief.kind, 'matrix');
+  const b2b = brief.options?.find((o) => o.option === 'B2B');
+  const euus = brief.options?.find((o) => o.option === 'EUUS');
+  assert.ok(b2b && euus);
+  assert.equal(b2b.riskFlags.length, 0, '否定语境不应判红牌');
+  assert.equal(euus.riskFlags.length, 1, '真实红牌应被判红牌');
+  assert.equal(brief.recommendedOption, 'B2B', '无红牌且证据全的方案应被推荐');
+});
+
+test('未知决策领域 + 空证据：safeRequired 不崩溃，回退为空维度集合', () => {
+  // 之前 safeRequired 在未知领域且无证据时会因 evidence 为 undefined 崩溃；修复后返回 [] 且不抛错
+  let brief;
+  assert.doesNotThrow(() => {
+    brief = buildBrief('totally-unknown-domain-xyz', '任意问题', []);
+  });
+  assert.equal(brief.kind, 'generic');
+  assert.equal(brief.totalWeightPct, 0);
+});

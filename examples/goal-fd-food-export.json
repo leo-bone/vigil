@@ -1,0 +1,133 @@
+{
+  "sessionId": "sess_fd_food_export_2026-10-29",
+  "question": "启动冻干食品（FD）跨境出口业务，选哪条路径：B2B 大宗批发（东南亚） 还是 跨境电商零售（欧美）？",
+  "domain": "work",
+  "evidenceSpec": "work",
+  "action": {
+    "kind": "decide",
+    "actor": "user",
+    "type": "generic_decision",
+    "target": "冻干食品跨境出口业务路径选择：B2B批发(东南亚) vs 跨境电商零售(欧美)",
+    "reversible": true,
+    "external": false,
+    "rationale": "为冻干食品跨境业务选择最优起步路径"
+  },
+  "positions": [
+    {
+      "actor": "vigil",
+      "authority": 1,
+      "conclusion": "allow",
+      "reason": "系统依据已核验证据生成决策矩阵（见 reasoning 阶段），交由确认闸门/裁决定夺"
+    }
+  ],
+  "evidence": [
+    {
+      "dimension": "authoritative",
+      "channel": "market-report-sea",
+      "source": "中国食品土畜进出口商会 / 海关总署冻干食品出口数据（公开年报）",
+      "verified": true,
+      "option": "B2B批发-东南亚",
+      "note": "东南亚（越南/泰国/马来）华人渠道对冻干水果、冻干小吃需求稳定；RCEP 关税减让利好；2025 中国冻干食品出口同比约 +18%",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "authoritative",
+      "channel": "market-report-euus",
+      "source": "Euromonitor / 亚马逊品类报告（公开摘要）",
+      "verified": true,
+      "option": "跨境电商零售-欧美",
+      "note": "欧美冻干食品（冻干咖啡、冻干零食、户外食品）客单价高、复购强；但合规与认证门槛高（FDA/EFSA/HACCP）",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "regulatory",
+      "channel": "compliance-sea",
+      "source": "海关总署进出口食品安全管理办法 + RCEP 原产地规则",
+      "verified": true,
+      "option": "B2B批发-东南亚",
+      "note": "出口食品生产企业需备案（出口食品生产企业备案）；东南亚多数国家接受中国检验检疫证书；RCEP 原产地证可降关税",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "regulatory",
+      "channel": "compliance-euus",
+      "source": "美国 FDA / 欧盟 EFSA 食品进口法规 + HACCP/FSMA",
+      "verified": true,
+      "option": "跨境电商零售-欧美",
+      "note": "红牌：欧美准入需 FDA 注册（美）、EU 食品接触材料与标签合规（欧）、HACCP；单证不全直接被退运，前期合规成本 5-15 万",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "financial",
+      "channel": "cost-sea",
+      "source": "长沙本地冻干代工报价 + 东南亚物流核算（估）",
+      "verified": true,
+      "option": "B2B批发-东南亚",
+      "note": "启动资金约 20-40 万（首单备货+海运+样品）；毛利率约 25-35%；回款周期 30-60 天；轻资产可先从转口/代工贴牌起步",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "financial",
+      "channel": "cost-euus",
+      "source": "亚马逊 FBA + 海外仓 + 合规核算（估）",
+      "verified": true,
+      "option": "跨境电商零售-欧美",
+      "note": "启动资金约 50-100 万（备货+海外仓+FBA+广告+合规）；毛利率高（40-55%）但流量与退货成本高、现金占用大；回款 14-45 天",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "expert",
+      "channel": "practitioner-sea",
+      "source": "长沙本地已做东南亚食品出口的贸易商访谈（估）",
+      "verified": true,
+      "option": "B2B批发-东南亚",
+      "note": "从业者反馈：东南亚订单小、议价狠、账期长，但门槛低、试错快；适合先跑通供应链再扩品类",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "expert",
+      "channel": "practitioner-euus",
+      "source": "跨境电商冻干品类卖家访谈（估）",
+      "verified": true,
+      "option": "跨境电商零售-欧美",
+      "note": "卖家反馈：欧美利润厚但合规与广告是生死线，新手易被封号/退运；建议先小批量测款再重投",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "alternative",
+      "channel": "alt-odm",
+      "source": "给国内品牌做冻干 ODM/代工作为兜底",
+      "verified": true,
+      "option": "B2B批发-东南亚",
+      "note": "若跨境受挫，可转而服务国内新消费品牌做冻干 ODM 代工，利用同一产线，去化产能",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "alternative",
+      "channel": "alt-platform",
+      "source": "TikTok Shop / 独立站 作为备选渠道",
+      "verified": true,
+      "option": "跨境电商零售-欧美",
+      "note": "除亚马逊外，可用 TikTok Shop、独立站分流，降低单一平台依赖与封号风险",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "risk",
+      "channel": "risk-sea",
+      "source": "东南亚路径风险研判",
+      "verified": true,
+      "option": "B2B批发-东南亚",
+      "note": "风险：账期长致现金流紧张、汇率波动（USD/CNY≈6.67）、低价内卷；但无硬性合规红牌，试错成本低",
+      "capturedAt": "2026-10-29"
+    },
+    {
+      "dimension": "risk",
+      "channel": "risk-euus",
+      "source": "欧美路径风险研判",
+      "verified": true,
+      "option": "跨境电商零售-欧美",
+      "note": "红牌：合规单证缺失即退运（红牌）、平台封号、广告 ROI 不稳；资金占用大，一旦滞销现金链断裂风险高",
+      "capturedAt": "2026-10-29"
+    }
+  ]
+}

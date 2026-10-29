@@ -49,7 +49,7 @@ function matches(source: EvidenceSource, q: EvidenceQuery): boolean {
 }
 
 /** 带超时的 fetch，避免某个不可达源把整个采集卡死 */
-async function fetchJson(url: string, timeoutMs = 7000): Promise<unknown> {
+async function fetchJson(url: string, timeoutMs = 5000): Promise<unknown> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -263,7 +263,8 @@ export class CryptoSource implements EvidenceSource {
 }
 
 /**
- * 股指行情源（Stooq CSV，无需 key，公网可达；沙箱内可能不可达，诚实降级）。
+ * 股指行情源（Stooq CSV，无需 key，公网可达；沙箱/部分地区可能被出网策略拦截，诚实降级）。
+ * 多候选地址顺序尝试，提高在公网环境的命中率；全部失败则标记未核验，由闸门诚实拦截。
  */
 export class StockIndexSource implements EvidenceSource {
   id = 'stooq';
@@ -272,36 +273,56 @@ export class StockIndexSource implements EvidenceSource {
     { domain: 'financing', dimension: 'financial', channel: 'sp500' },
   ];
 
+  /** 候选地址（S&P 500 现货指数）。任一可用即通过；全失败才降级。 */
+  static readonly CANDIDATE_URLS = [
+    'https://stooq.com/q/l/?s=spx.us&f=sd2t2ohlcv&h&e=csv',
+    'https://stooq.com/q/l/?s=^spx&f=sd2t2ohlcv&h&e=csv',
+    'https://stooq.pl/q/l/?s=spx.us&f=sd2t2ohlcv&h&e=csv',
+  ];
+
   async fetch(_q: EvidenceQuery): Promise<ChannelEvidence> {
-    const url = 'https://stooq.com/q/l/?s=spx.us&f=sd2t2ohlcv&h&e=csv';
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 7000);
-    let text: string;
-    try {
-      const res = await fetch(url, { signal: ctrl.signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      text = await res.text();
-    } finally {
-      clearTimeout(timer);
+    let lastErr: unknown;
+    for (const url of StockIndexSource.CANDIDATE_URLS) {
+      try {
+        const text = await fetchText(url, 6000);
+        const lines = text.trim().split('\n').filter(Boolean);
+        if (lines.length < 2) throw new Error('Stooq 返回非预期内容');
+        const cols = lines[0].toLowerCase().split(',');
+        const row = lines[lines.length - 1].split(',');
+        const close = Number(row[cols.indexOf('close')]);
+        const date = row[cols.indexOf('date')];
+        if (!Number.isFinite(close)) throw new Error('Stooq 缺 close 字段');
+        const fetchedAt = new Date().toISOString();
+        return {
+          dimension: 'financial',
+          channel: 'sp500',
+          source: `${url} (date=${date})`,
+          verified: true,
+          value: close,
+          unit: 'pts',
+          note: `S&P 500 收盘 ${date} = ${close}（Stooq，抓取于 ${fetchedAt}）`,
+          capturedAt: fetchedAt,
+        };
+      } catch (err) {
+        lastErr = err;
+      }
     }
-    const lines = text.trim().split('\n').filter(Boolean);
-    if (lines.length < 2) throw new Error('Stooq 返回非预期内容');
-    const cols = lines[0].toLowerCase().split(',');
-    const row = lines[lines.length - 1].split(',');
-    const close = Number(row[cols.indexOf('close')]);
-    const date = row[cols.indexOf('date')];
-    if (!Number.isFinite(close)) throw new Error('Stooq 缺 close 字段');
-    const fetchedAt = new Date().toISOString();
-    return {
-      dimension: 'financial',
-      channel: 'sp500',
-      source: `${url} (date=${date})`,
-      verified: true,
-      value: close,
-      unit: 'pts',
-      note: `S&P 500 收盘 ${date} = ${close}（Stooq，抓取于 ${fetchedAt}）`,
-      capturedAt: fetchedAt,
-    };
+    throw new Error(
+      `Stooq 在所有候选地址均失败（${lastErr instanceof Error ? lastErr.message : String(lastErr)}）；沙箱/地区出网限制时属正常，权益维度将诚实降级`,
+    );
+  }
+}
+
+/** 带超时的文本抓取（Stooq 返回 CSV，不走 JSON 解析） */
+async function fetchText(url: string, timeoutMs = 5000): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -500,14 +521,18 @@ export async function gatherEvidence(
       continue;
     }
 
-    for (const src of sourcesForDim) {
+    // 同一维度的多路源并发探测（任一成功即覆盖该维度），既提速又避免单源超时级联拖垮整轮采集
+    const settled = await Promise.allSettled(
+      sourcesForDim.map((src) => src.fetch({ dimension: dim, domain, question })),
+    );
+    settled.forEach((res, i) => {
+      const src = sourcesForDim[i];
       const cap = src.serves.find((c) => (c.domain === undefined || c.domain === domain) && c.dimension === dim);
       const channel = cap?.channel ?? src.id;
-      try {
-        const ev = await src.fetch({ dimension: dim, domain, question });
-        evidence.push(ev);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+      if (res.status === 'fulfilled') {
+        evidence.push(res.value);
+      } else {
+        const msg = res.reason instanceof Error ? res.reason.message : String(res.reason);
         evidence.push({
           dimension: dim,
           channel,
@@ -516,7 +541,7 @@ export async function gatherEvidence(
           note: `采集失败：${msg}`,
         });
       }
-    }
+    });
   }
 
   // 以"维度是否至少有 1 条 verified"汇总，与完整性闸门口径一致

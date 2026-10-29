@@ -20,6 +20,7 @@ export type LoopStage =
   | 'completed'
   | 'paused'
   | 'resumed'
+  | 'monitor'
   | 'alert';
 
 export type EventLevel = 'info' | 'alert' | 'gate';

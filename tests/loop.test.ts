@@ -312,3 +312,59 @@ test('决策循环：invest 领域目标跑通 证据门→仲裁→确认闸门
     '闭环执行应输出 goal.plan 中的配置步骤',
   );
 });
+
+test('monitorCycle：重新采集/重建简报，并能在决策依据变化时主动 alert', async () => {
+  const dir = tmp();
+  const captured: LoopEvent[] = [];
+  const notifier = {
+    id: 'spy',
+    notify: async (e: LoopEvent): Promise<void> => {
+      captured.push(e);
+    },
+  };
+  const mk = (
+    option: string,
+    dimension: 'authoritative' | 'expert' | 'regulatory' | 'financial' | 'alternative' | 'risk',
+    note: string,
+  ): ChannelEvidence => ({
+    dimension,
+    channel: `${dimension}-${option}`,
+    source: 'unit-test',
+    verified: true,
+    option,
+    note,
+  });
+  const goal: LoopGoal = {
+    sessionId: 'sess-monitor',
+    question: '本科升学：专升本 vs 竞赛免试',
+    action: { kind: 'decide', actor: 'user', type: 'generic_decision', target: 'x', reversible: true, external: false },
+    positions: [{ actor: 'vigil', authority: 1, conclusion: 'allow', reason: 'r' }],
+    evidenceSpec: 'education',
+    domain: 'education',
+    evidence: [
+      mk('专升本', 'authoritative', '统考入学'), mk('专升本', 'expert', '稳定'), mk('专升本', 'regulatory', '全日制本科'),
+      mk('专升本', 'financial', '成本低'), mk('专升本', 'alternative', '自考兜底'), mk('专升本', 'risk', '需备考时间投入'),
+      mk('竞赛', 'authoritative', '获奖免试'), mk('竞赛', 'expert', '淘汰率高'), mk('竞赛', 'regulatory', '名额有限'),
+      mk('竞赛', 'financial', '成本高'), mk('竞赛', 'alternative', '直接就业'), mk('竞赛', 'risk', '需持续备赛'),
+    ],
+  };
+  const loop = new DecisionLoop(loopKernel(), goal, dir, undefined, notifier as never);
+
+  const b1 = await loop.monitorCycle();
+  assert.equal(b1?.kind, 'matrix');
+  // 初始：两方案均 100% 且无红牌 → 并列，无推荐
+  assert.equal(b1?.recommendedOption, undefined);
+
+  // 引入变化：给「竞赛」加真实红牌 → 推荐应变为「专升本」
+  goal.evidence.forEach((e) => {
+    if (e.option === '竞赛' && e.dimension === 'risk') e.note = '红牌：获奖率极低、政策收紧';
+  });
+  captured.length = 0;
+  const b2 = await loop.monitorCycle();
+  assert.equal(b2?.recommendedOption, '专升本');
+
+  // 决策依据变化应触发一条 level=alert 的 monitor 事件（主动推送）
+  const alerts = captured.filter((e) => e.stage === 'monitor' && e.level === 'alert');
+  assert.ok(alerts.length >= 1, '应针对推荐变化发出 alert 事件');
+  assert.ok(alerts[0].message.includes('专升本'));
+});
