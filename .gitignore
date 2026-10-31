@@ -7,3 +7,12 @@ dist/
 # Python tempfile 探针在 cwd 兜底时留下的空文件（内容固定是 "blat"）。
 # 某些受限环境会拦截临时文件删除，它就会赖在仓库根目录不走。
 # 这是环境问题，所以规则放在 .git/info/exclude，不进仓库。
+
+
+# --- 环境变量与密钥（勿提交）---
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.p12
